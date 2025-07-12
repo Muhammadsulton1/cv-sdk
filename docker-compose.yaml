@@ -1,0 +1,73 @@
+version: '3.7'
+
+services:
+  master:
+    image: chrislusf/seaweedfs:3.93
+    command: "master -ip=master -mdir=/data -peers=master:9333"
+    ports:
+      - "9333:9333"  # Web UI + API
+      - "19333:19333" # gRPC
+    volumes:
+      - master_data:/data
+    networks:
+      - seaweed-net
+
+  volume1:
+    image: chrislusf/seaweedfs:3.93
+    command: "volume -mserver=master:9333 -port=8080 -dir=/data1"
+    volumes:
+      - ./volume1_data:/data1
+    depends_on:
+      - master
+    ports:
+      - "8080:8080"  # API
+      - "18080:8081" # Web UI
+    environment:
+      - TTL=10m
+    networks:
+      - seaweed-net
+
+  # Volume сервер 2 (опционально, для репликации)
+  volume2:
+    image: chrislusf/seaweedfs:3.93
+    command: "volume -mserver=master:9333 -port=8080 -dir=/data2"
+    volumes:
+        - ./volume2_data:/data2
+    depends_on:
+      - master
+    ports:
+      - "8082:8080"
+      - "18081:8081"
+    environment:
+      - TTL=10m
+    networks:
+      - seaweed-net
+
+  # Filer сервер (HTTP API + S3)
+  filer:
+    image: chrislusf/seaweedfs:3.93
+    command: "filer -master=master:9333"
+    depends_on:
+      - master
+    ports:
+      - "8888:8888"   # Web UI
+      - "8333:8333"   # S3 API
+    networks:
+      - seaweed-net
+
+
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+    command: "-js"
+
+
+volumes:
+  master_data:
+  volume1_data:
+  volume2_data:
+
+networks:
+  seaweed-net:
+    driver: bridge
