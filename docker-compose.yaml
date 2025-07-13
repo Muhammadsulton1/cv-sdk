@@ -27,22 +27,6 @@ services:
     networks:
       - seaweed-net
 
-  # Volume сервер 2 (опционально, для репликации)
-  volume2:
-    image: chrislusf/seaweedfs:3.93
-    command: "volume -mserver=master:9333 -port=8080 -dir=/data2"
-    volumes:
-        - ./volume2_data:/data2
-    depends_on:
-      - master
-    ports:
-      - "8082:8080"
-      - "18081:8081"
-    environment:
-      - TTL=10m
-    networks:
-      - seaweed-net
-
   # Filer сервер (HTTP API + S3)
   filer:
     image: chrislusf/seaweedfs:3.93
@@ -61,6 +45,11 @@ services:
     ports:
       - "4222:4222"
     command: "-js"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
 
 
 volumes:

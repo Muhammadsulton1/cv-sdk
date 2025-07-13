@@ -73,15 +73,3 @@ class ModelInference(ABC):
         self.nats_conn = await nats.connect(servers)
         await self.nats_conn.subscribe(topic, cb=self.message_handler)
         print(f"[{self.model_name}] Subscribed to NATS topic: {topic}")
-
-
-class FileRouter(ABC):
-    @abstractmethod
-    async def upload_file(self, file_data: bytes, **kwargs) -> str:
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass

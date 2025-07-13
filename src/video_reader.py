@@ -1,15 +1,19 @@
+import asyncio
+import os
+import uuid
+import aiohttp
 import av
 import cv2
+import nats
 
-from abs_src.abs_reader import AbstractReader
+from nats.errors import ConnectionClosedError, TimeoutError
+from abs_src.abs_reader import AbstractReader, FileUploader
+from utils.logger import logger
 
 
-class VideoStreamReader(AbstractReader):
-    def __init__(self, video_source, skip_frames=0, stream_index=0):
-        super().__init__(video_source, skip_frames, stream_index)
-        self.source = video_source
-        self.skip_frames = skip_frames
-        self.stream_index = stream_index
+class AVReader(AbstractReader):
+    def __init__(self):
+        super().__init__()
         self.container = None
         self.video_stream = None
         self.frame_generator = None
@@ -86,12 +90,8 @@ class VideoStreamReader(AbstractReader):
 
 
 class OpencvVideoReader(AbstractReader):
-    def __init__(self, video_source, skip_frames=0, stream_index=0):
-        super().__init__(video_source, skip_frames, stream_index)
-        self.source = video_source
-        self.skip_frames = skip_frames
-        self.stream_index = stream_index
-        self.video_stream = None
+    def __init__(self):
+        super().__init__()
         self.codec_name = "unknown"
         self.width = 0
         self.height = 0
@@ -115,7 +115,6 @@ class OpencvVideoReader(AbstractReader):
         self.height = int(self.video_stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.framerate = self.video_stream.get(cv2.CAP_PROP_FPS)
 
-        # Получаем FourCC кодек и преобразуем в строку
         fourcc_int = self.video_stream.get(cv2.CAP_PROP_FOURCC)
         if fourcc_int != 0:
             self.codec_name = "".join([
@@ -132,13 +131,11 @@ class OpencvVideoReader(AbstractReader):
 
     def get_frame(self):
         """Возвращает следующий кадр с учетом skip_frames."""
-        # Пропускаем кадры с помощью grab() для эффективности
         for _ in range(self.skip_frames):
             if not self.video_stream.grab():
                 return None
             self.frames_processed += 1
 
-        # Читаем и декодируем актуальный кадр
         ret, frame = self.video_stream.read()
         self.frames_processed += 1
 
@@ -167,3 +164,146 @@ class OpencvVideoReader(AbstractReader):
             "frames_skipped": self.skip_frames,
             "frames_processed": self.frames_processed
         }
+
+
+class SeaweedFSUploader(FileUploader):
+    def __init__(self):
+        self.master_url = os.getenv("master_url")
+        self.volume_url = os.getenv("volume_url")
+        self.bucket_name = os.getenv("bucket_name")
+        self.ttl = os.getenv("ttl_bucket")
+        self._session = None
+
+    async def __aenter__(self):
+        self._session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._session:
+            await self._session.close()
+
+    async def upload_file(self, file_data: bytes) -> str:
+        assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
+        async with self._session.get(assign_url) as resp:
+            assign_data = await resp.json()
+            fid = assign_data["fid"]
+
+        upload_url = f"{self.volume_url}/{self.bucket_name}/{fid}?ttl={self.ttl}"
+        file_name = f"{uuid.uuid4()}.jpg"
+
+        form_data = aiohttp.FormData()
+        form_data.add_field(
+            'file',
+            file_data,
+            filename=file_name,
+            content_type='image/jpeg'
+        )
+
+        async with self._session.post(upload_url, data=form_data) as resp:
+            resp.raise_for_status()
+
+        return f"{self.volume_url}/{self.bucket_name}/{fid}"
+
+
+class VideoReaderFactory:
+    """Фабрика для создания объектов чтения видео."""
+
+    _readers = {
+        "opencv": OpencvVideoReader,
+        "av": AVReader,
+    }
+
+    @classmethod
+    def create_reader(cls, reader_type: str):
+        """
+        Создает экземпляр видео ридера указанного типа.
+
+        :param reader_type: Тип ридера ('opencv' или 'av')
+        :return: Экземпляр класса ридера
+        :raises ValueError: Если указан неподдерживаемый тип ридера
+        """
+        reader_class = cls._readers.get(reader_type.lower())
+
+        if reader_class is None:
+            supported = ", ".join(cls._readers.keys())
+            raise ValueError(
+                f"Не поддерживаемый источник для чтения видео потока: '{reader_type}'. "
+                f"поддерживаемые типы: {supported}"
+            )
+
+        return reader_class()
+
+    @classmethod
+    def register_reader(cls, reader_type: str, reader_class):
+        """
+        Регистрирует новый тип ридера в фабрике.
+
+        :param reader_type: Идентификатор типа ридера
+        :param reader_class: Класс ридера (должен быть вызываемым)
+        """
+        if not callable(reader_class):
+            raise TypeError("Reader class должен быть вызываемым объектом")
+        cls._readers[reader_type.lower()] = reader_class
+
+    @classmethod
+    def supported_readers(cls):
+        """Возвращает список поддерживаемых типов ридеров."""
+        return list(cls._readers.keys())
+
+
+class ReaderManager:
+    def __init__(self):
+        reader_type = os.environ.get("reader_type", "opencv")
+        if reader_type is None:
+            raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
+
+        self.reader = VideoReaderFactory.create_reader(reader_type)
+        self.uploader = SeaweedFSUploader()
+        self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
+        self.topic = os.getenv("topic_stream")
+
+    async def main(self):
+        nc = None
+        try:
+            nc = await nats.connect(
+                servers=[self.nats_url],
+                connect_timeout=5,
+                max_reconnect_attempts=3
+            )
+            logger.info("Connected to NATS server")
+
+        except Exception as e:
+            logger.error(f"NATS соединение упало с ошибкой: {e}")
+            return
+
+        try:
+            with self.reader as stream:
+                while True:
+                    frame = stream.get_frame()
+                    if frame is None:
+                        logger.info("Конец видео стрима")
+                        break
+
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    image_data = buffer.tobytes()
+
+                    async with self.uploader as publisher:
+                        try:
+                            file_url = await publisher.upload_file(image_data)
+                            await nc.publish(self.topic, file_url.encode())
+                            logger.debug(f"Кадр загружен в бакет по ссылке: {file_url}")
+                        except (ConnectionClosedError, TimeoutError) as e:
+                            logger.error(f"Ошибка обработки кадра: {e}")
+
+        except KeyboardInterrupt:
+            logger.info("Процесс обработки остановлен пользователем")
+        except Exception as e:
+            logger.exception(f"Не предвиденная ошибка обработки события в VideoReader", {e})
+        finally:
+            if nc and not nc.is_closed:
+                await nc.drain()
+                await nc.close()
+                logger.info("NATS соединение закрыто")
+
+    def process(self):
+        asyncio.run(self.main())

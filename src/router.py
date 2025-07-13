@@ -1,107 +1,207 @@
 import asyncio
-import aiohttp
-import uuid
-
-import cv2
-import nats
-from nats.errors import ConnectionClosedError, TimeoutError
-
-from abs_src.modules_interface import FileRouter
-from video_reader import VideoStreamReader
+import json
+from nats.aio.client import Client as NATS
+from nats.aio.errors import ErrConnectionClosed, ErrTimeout
+import redis
+import time
+from utils.logger import logger
 
 
-class SeaweedFSRouter(FileRouter):
-    def __init__(self, master_url="http://localhost:9333", volume_url=None,
-                 bucket_name="video_stream"):
-        self.master_url = master_url
-        self.volume_url = volume_url
-        self.bucket_name = bucket_name
-        self._session = None
+class Router:
+    def __init__(self,
+                 nats_servers=["nats://localhost:4222"],
+                 redis_host="localhost",
+                 redis_port=6379,
+                 input_topic="frames-stream",
+                 output_topic_prefix="inference",
+                 max_concurrent=50,
+                 cache_ttl=600):
+        """
+        Инициализация роутера
 
-    async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
-        return self
+        :param nats_servers: Список серверов NATS
+        :param redis_host: Хост Redis для кэширования
+        :param redis_port: Порт Redis
+        :param input_topic: Входной топик для кадров
+        :param output_topic_prefix: Префикс выходных топиков
+        :param max_concurrent: Максимальное количество одновременных задач
+        :param cache_ttl: TTL кэша в секундах
+        """
+        self.nats_servers = nats_servers
+        self.redis_host = redis_host
+        self.redis_port = redis_port
+        self.input_topic = input_topic
+        self.output_topic_prefix = output_topic_prefix
+        self.max_concurrent = max_concurrent
+        self.cache_ttl = cache_ttl
 
-    async def __aexit__(self, exc_type, exc, tb):
-        if self._session:
-            await self._session.close()
-
-    async def upload_file(self, file_data: bytes, ttl: str = "10m") -> str:
-        assign_url = f"{self.master_url}/dir/assign?ttl={ttl}"
-        async with self._session.get(assign_url) as resp:
-            assign_data = await resp.json()
-            fid = assign_data["fid"]
-
-        upload_url = f"http://localhost:8888/video-stream/{fid}?ttl={ttl}"
-        file_name = f"{uuid.uuid4()}.jpg"
-
-        form_data = aiohttp.FormData()
-        form_data.add_field(
-            'file',
-            file_data,
-            filename=file_name,
-            content_type='image/jpeg'
+        self.nc = NATS()
+        self.redis = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            decode_responses=False,
+            max_connections=20
+        )
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.logger = logger
+        self.processed_cache = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            db=1,  # Отдельная БД для дедупликации
+            decode_responses=True
         )
 
-        async with self._session.post(upload_url, data=form_data) as resp:
-            resp.raise_for_status()
+    async def connect(self):
+        """Подключение к NATS и Redis"""
+        try:
+            # Подключаемся к NATS
+            await self.nc.connect(
+                servers=self.nats_servers,
+                max_reconnect_attempts=-1,  # Бесконечные попытки
+                reconnect_time_wait=2,
+            )
+            self.logger.info(f"Connected to NATS at {self.nats_servers}")
 
-        return f"http://localhost:8888/video-stream/{fid}"
+            # Проверяем подключение к Redis
+            if not self.redis.ping():
+                raise ConnectionError("Redis connection failed")
+            self.logger.info(f"Connected to Redis at {self.redis_host}:{self.redis_port}")
 
+        except Exception as e:
+            self.logger.error(f"Connection error: {str(e)}")
+            raise
 
-async def main():
-    source = "video/test_maneken.mp4"
-    nats_url = "nats://localhost:4222"
-    topic = "inference_frames"
+    async def message_handler(self, msg):
+        """Обработчик входящих сообщений"""
+        try:
+            async with self.semaphore:  # Ограничение параллелизма
+                data = json.loads(msg.data.decode())
+                self.logger.debug(f"Received message: {data['frame_id']}")
 
-    try:
-        nc = await nats.connect(
-            servers=[nats_url],
-            connect_timeout=5,
-            max_reconnect_attempts=3
+                # Дедупликация сообщений
+                if self.is_duplicate(data["frame_id"]):
+                    self.logger.debug(f"Duplicate frame skipped: {data['frame_id']}")
+                    return
+
+                # Кэширование метаданных
+                self.cache_frame_metadata(data)
+
+                # Маршрутизация для каждой модели
+                await self.route_to_models(data)
+
+        except Exception as e:
+            self.logger.error(f"Error processing message: {str(e)}")
+
+    def is_duplicate(self, frame_id):
+        """Проверка дубликатов через Redis"""
+        key = f"frame:{frame_id}"
+        if self.processed_cache.exists(key):
+            return True
+
+        # Устанавливаем ключ с TTL
+        self.processed_cache.setex(key, self.cache_ttl, "1")
+        return False
+
+    def cache_frame_metadata(self, data):
+        """Кэширование метаданных кадра в Redis"""
+        try:
+            key = f"frame_meta:{data['frame_id']}"
+            value = {
+                "seaweed_url": data["seaweed_url"],
+                "timestamp": data["timestamp"],
+                "models": ",".join(data["models"])
+            }
+            self.redis.hset(key, mapping=value)
+            self.redis.expire(key, self.cache_ttl)
+        except Exception as e:
+            self.logger.error(f"Caching failed: {str(e)}")
+
+    async def route_to_models(self, data):
+        """Перенаправление кадра в топики для моделей"""
+        tasks = []
+        for model in data["models"]:
+            output_topic = f"{self.output_topic_prefix}.{model}"
+
+            # Формируем оптимизированное сообщение
+            message = {
+                "frame_id": data["frame_id"],
+                "seaweed_url": data["seaweed_url"],
+                "model": model,
+                "timestamp": time.time(),
+                "cached_key": f"frame_meta:{data['frame_id']}"  # Для быстрого доступа
+            }
+
+            # Асинхронная отправка
+            task = asyncio.create_task(
+                self.nc.publish(output_topic, json.dumps(message).encode())
+            )
+            tasks.append(task)
+
+        # Ожидаем завершения всех отправок
+        await asyncio.gather(*tasks)
+        self.logger.info(f"Routed frame {data['frame_id']} to {len(data['models'])} models")
+
+    async def subscribe(self):
+        """Подписка на входной топик"""
+        await self.nc.subscribe(
+            self.input_topic,
+            cb=self.message_handler,
+            config={
+                "deliver_policy": "all",  # Получать все сообщения
+                "ack_policy": "explicit",  # Ручное подтверждение
+                "max_ack_pending": 1000,  # Макс. неподтвержденных сообщений
+            }
         )
-    except (ConnectionClosedError, TimeoutError) as e:
-        print(f"Failed to connect to NATS: {e}")
-        return
+        self.logger.info(f"Subscribed to {self.input_topic}")
 
-    try:
-        with VideoStreamReader(source, skip_frames=0) as stream:
-            while True:
-                frame = stream.get_frame()
-                if frame is None:
-                    break
+    async def run(self):
+        """Основной цикл работы роутера"""
+        await self.connect()
+        await self.subscribe()
+        self.logger.info("Router started. Press Ctrl+C to exit.")
 
-                _, buffer = cv2.imencode('.jpg', frame)
-                image_data = buffer.tobytes()
+        # Бесконечный цикл обработки
+        while True:
+            await asyncio.sleep(1)
 
-                async with SeaweedFSRouter() as router:
-                    try:
-                        file_url = await router.upload_file(image_data)
-                        await nc.publish(topic, file_url.encode())
-                    except Exception as e:
-                        continue
-
-                #await asyncio.sleep(0.01)
-
-    except KeyboardInterrupt:
-        print("Processing interrupted by user")
-    finally:
-        if nc.is_connected:
-            await nc.drain()
-            await nc.close()
+    async def close(self):
+        """Корректное завершение работы"""
+        await self.nc.drain()
+        self.redis.close()
+        self.processed_cache.close()
+        self.logger.info("Router shutdown complete")
 
 
 if __name__ == "__main__":
-    # Обработка сигналов прерывания
-    # loop = asyncio.new_event_loop()
-    # asyncio.set_event_loop(loop)
+    router = Router(
+        nats_servers=["nats://localhost:4222"],
+        redis_host="localhost",
+        input_topic="frames-stream",
+        output_topic_prefix="inference",
+        max_concurrent=100
+    )
 
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(router.run())
+    except KeyboardInterrupt:
+        loop.run_until_complete(router.close())
+    finally:
+        loop.close()
 
-    # try:
-    #     loop.run_until_complete(main())
-    # except KeyboardInterrupt:
-    #     print("Program terminated")
-    # finally:
-    #     loop.close()
-    #     sys.exit(0)
+if __name__ == "__main__":
+    router = Router(
+        nats_servers=["nats://localhost:4222"],
+        redis_host="localhost",
+        input_topic="frames-stream",
+        output_topic_prefix="inference",
+        max_concurrent=100
+    )
+
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(router.run())
+    except KeyboardInterrupt:
+        loop.run_until_complete(router.close())
+    finally:
+        loop.close()

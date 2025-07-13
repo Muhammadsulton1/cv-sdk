@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
+import os
 
 
 class AbstractReader(ABC):
-    def __init__(self, source, skip_frames=0, stream_index=0):
-        self.source = source
-        self.skip_frames = skip_frames
-        self.stream_index = stream_index
+    def __init__(self):
+        self.source = os.getenv('video_source')  # будет взято из конфига
+        self.skip_frames = int(os.getenv('video_skip_frames'))  # будет взято из конфига
+        self.stream_index = int(os.getenv('video_index'))  # будет взято из конфига
         self.is_open = False
 
     @abstractmethod
@@ -31,11 +32,13 @@ class AbstractReader(ABC):
         self.close()
 
 
-class AbstractBucketManager(ABC):
+class FileUploader(ABC):
     @abstractmethod
-    async def upload_image(self):
-        raise NotImplementedError
+    async def upload_file(self, file_data: bytes, **kwargs) -> str:
+        pass
 
-    @abstractmethod
-    async def get_image_url(self):
-        raise NotImplementedError
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
