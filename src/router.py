@@ -1,207 +1,255 @@
 import asyncio
 import json
-from nats.aio.client import Client as NATS
-from nats.aio.errors import ErrConnectionClosed, ErrTimeout
-import redis
+import os
 import time
+from nats.aio.client import Client as NATS
 from utils.logger import logger
 
 
 class Router:
-    def __init__(self,
-                 nats_servers=["nats://localhost:4222"],
-                 redis_host="localhost",
-                 redis_port=6379,
-                 input_topic="frames-stream",
-                 output_topic_prefix="inference",
-                 max_concurrent=50,
-                 cache_ttl=600):
-        """
-        Инициализация роутера
+    def __init__(self):
+        self.nats_host = os.getenv("nats_host", "nats://localhost:4222").split(",")
+        self.redis_cli = os.getenv('redis_host', 'localhost')
+        self.redis_port = os.getenv('redis_port', 6379)
 
-        :param nats_servers: Список серверов NATS
-        :param redis_host: Хост Redis для кэширования
-        :param redis_port: Порт Redis
-        :param input_topic: Входной топик для кадров
-        :param output_topic_prefix: Префикс выходных топиков
-        :param max_concurrent: Максимальное количество одновременных задач
-        :param cache_ttl: TTL кэша в секундах
-        """
-        self.nats_servers = nats_servers
-        self.redis_host = redis_host
-        self.redis_port = redis_port
-        self.input_topic = input_topic
-        self.output_topic_prefix = output_topic_prefix
-        self.max_concurrent = max_concurrent
-        self.cache_ttl = cache_ttl
+        self.nats_cli = None
+        self.topic_input = os.getenv('topic_stream')
+        self.sub = None
 
-        self.nc = NATS()
-        self.redis = redis.Redis(
-            host=redis_host,
-            port=redis_port,
-            decode_responses=False,
-            max_connections=20
-        )
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.logger = logger
-        self.processed_cache = redis.Redis(
-            host=redis_host,
-            port=redis_port,
-            db=1,  # Отдельная БД для дедупликации
-            decode_responses=True
-        )
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+        return None
 
     async def connect(self):
-        """Подключение к NATS и Redis"""
+        self.nats_cli = NATS()
         try:
-            # Подключаемся к NATS
-            await self.nc.connect(
-                servers=self.nats_servers,
-                max_reconnect_attempts=-1,  # Бесконечные попытки
-                reconnect_time_wait=2,
+            await self.nats_cli.connect(
+                servers=self.nats_host,
+                max_reconnect_attempts=-1,
+                reconnect_time_wait=2
             )
-            self.logger.info(f"Connected to NATS at {self.nats_servers}")
-
-            # Проверяем подключение к Redis
-            if not self.redis.ping():
-                raise ConnectionError("Redis connection failed")
-            self.logger.info(f"Connected to Redis at {self.redis_host}:{self.redis_port}")
-
+            logger.info("Connected to NATS SERVER")
         except Exception as e:
-            self.logger.error(f"Connection error: {str(e)}")
+            logger.error(f"Connection error: {e}")
             raise
 
+    async def close(self):
+        try:
+            if self.nats_cli.is_connected:
+                await self.nats_cli.drain()
+        except Exception as e:
+            logger.error(f"Error during drain: {e}")
+        finally:
+            await self.nats_cli.close()
+
+    async def subscribe(self):
+        if self.nats_cli is None or not self.nats_cli.is_connected:
+            raise RuntimeError("NATS client not connected")
+
+        # Используем callback для обработки сообщений
+        self.sub = await self.nats_cli.subscribe(
+            subject="frames-stream",
+            cb=self.message_handler
+        )
+        logger.info(f"Subscribed to {self.topic_input}.*")
+
+    # Обработчик входящих сообщений
     async def message_handler(self, msg):
-        """Обработчик входящих сообщений"""
-        try:
-            async with self.semaphore:  # Ограничение параллелизма
-                data = json.loads(msg.data.decode())
-                self.logger.debug(f"Received message: {data['frame_id']}")
+        subject = msg.subject
+        data_str = msg.data.decode()
+        data = json.loads(data_str)
+        logger.debug(f"Received message [{subject}]: {data}")
 
-                # Дедупликация сообщений
-                if self.is_duplicate(data["frame_id"]):
-                    self.logger.debug(f"Duplicate frame skipped: {data['frame_id']}")
-                    return
+        await self.publish(data)
 
-                # Кэширование метаданных
-                self.cache_frame_metadata(data)
+        # Здесь можно добавить обработку сообщения
+        # Например, вызов внешних сервисов или запись в Redis
 
-                # Маршрутизация для каждой модели
-                await self.route_to_models(data)
-
-        except Exception as e:
-            self.logger.error(f"Error processing message: {str(e)}")
-
-    def is_duplicate(self, frame_id):
-        """Проверка дубликатов через Redis"""
-        key = f"frame:{frame_id}"
-        if self.processed_cache.exists(key):
-            return True
-
-        # Устанавливаем ключ с TTL
-        self.processed_cache.setex(key, self.cache_ttl, "1")
-        return False
-
-    def cache_frame_metadata(self, data):
-        """Кэширование метаданных кадра в Redis"""
-        try:
-            key = f"frame_meta:{data['frame_id']}"
-            value = {
-                "seaweed_url": data["seaweed_url"],
-                "timestamp": data["timestamp"],
-                "models": ",".join(data["models"])
-            }
-            self.redis.hset(key, mapping=value)
-            self.redis.expire(key, self.cache_ttl)
-        except Exception as e:
-            self.logger.error(f"Caching failed: {str(e)}")
-
-    async def route_to_models(self, data):
-        """Перенаправление кадра в топики для моделей"""
-        tasks = []
+    async def publish(self, data):
+        model_count = len(data["models"])
         for model in data["models"]:
-            output_topic = f"{self.output_topic_prefix}.{model}"
+            output_topic = f"inference.{model}"
 
-            # Формируем оптимизированное сообщение
             message = {
                 "frame_id": data["frame_id"],
                 "seaweed_url": data["seaweed_url"],
                 "model": model,
                 "timestamp": time.time(),
-                "cached_key": f"frame_meta:{data['frame_id']}"  # Для быстрого доступа
+                "cached_key": f"frame_meta:{data['frame_id']}"
             }
 
-            # Асинхронная отправка
-            task = asyncio.create_task(
-                self.nc.publish(output_topic, json.dumps(message).encode())
-            )
-            tasks.append(task)
+            print(f"Publishing message: {message}")
 
-        # Ожидаем завершения всех отправок
-        await asyncio.gather(*tasks)
-        self.logger.info(f"Routed frame {data['frame_id']} to {len(data['models'])} models")
+            await self.nats_cli.publish(output_topic, json.dumps(message).encode())
 
-    async def subscribe(self):
-        """Подписка на входной топик"""
-        await self.nc.subscribe(
-            self.input_topic,
-            cb=self.message_handler,
-            config={
-                "deliver_policy": "all",  # Получать все сообщения
-                "ack_policy": "explicit",  # Ручное подтверждение
-                "max_ack_pending": 1000,  # Макс. неподтвержденных сообщений
-            }
-        )
-        self.logger.info(f"Subscribed to {self.input_topic}")
+        logger.info(f"Routed frame {data['frame_id']} to {model_count} models")
 
     async def run(self):
-        """Основной цикл работы роутера"""
-        await self.connect()
         await self.subscribe()
-        self.logger.info("Router started. Press Ctrl+C to exit.")
-
-        # Бесконечный цикл обработки
+        logger.info("Listening for messages...")
         while True:
-            await asyncio.sleep(1)
-
-    async def close(self):
-        """Корректное завершение работы"""
-        await self.nc.drain()
-        self.redis.close()
-        self.processed_cache.close()
-        self.logger.info("Router shutdown complete")
+            await asyncio.sleep(0.005)  # Бесконечный цикл с минимальной нагрузкой
 
 
-if __name__ == "__main__":
-    router = Router(
-        nats_servers=["nats://localhost:4222"],
-        redis_host="localhost",
-        input_topic="frames-stream",
-        output_topic_prefix="inference",
-        max_concurrent=100
-    )
+if __name__ == '__main__':
+    async def main():
+        async with Router() as router:
+            await router.run()  # Запускаем постоянное прослушивание
 
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(router.run())
-    except KeyboardInterrupt:
-        loop.run_until_complete(router.close())
-    finally:
-        loop.close()
 
-if __name__ == "__main__":
-    router = Router(
-        nats_servers=["nats://localhost:4222"],
-        redis_host="localhost",
-        input_topic="frames-stream",
-        output_topic_prefix="inference",
-        max_concurrent=100
-    )
+    asyncio.run(main())
 
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(router.run())
-    except KeyboardInterrupt:
-        loop.run_until_complete(router.close())
-    finally:
-        loop.close()
+# import asyncio
+# import json
+# import time
+# from abs_src.abs_router import AbstractRouter
+#
+#
+# class Router(AbstractRouter):
+#     def __init__(self):
+#         super().__init__()
+#         self.sub = None
+#
+#     async def connect(self):
+#         try:
+#             await self.nats_cli.connect(
+#                 servers=self.nats_servers,
+#                 max_reconnect_attempts=-1,
+#                 reconnect_time_wait=2,
+#             )
+#             self.logger.info(f"Connected to NATS at {self.nats_servers}")
+#
+#             # Verify Redis connection
+#             self.redis_cli.ping()
+#             self.logger.info(f"Connected to Redis at {self.redis_host}:{self.redis_port}")
+#         except Exception as e:
+#             self.logger.error(f"Connection error: {str(e)}")
+#             raise
+#
+#     async def close_connection(self):
+#         try:
+#             await self.nats_cli.drain()
+#         except Exception as e:
+#             self.logger.error(f"Error draining NATS: {str(e)}")
+#         finally:
+#             self.nats_cli.disconnect()
+#
+#         self.redis_cli.close()
+#         self.logger.info("Router shutdown complete")
+#
+#     async def subscribe(self):
+#         self.sub = await self.nats_cli.subscribe(f'{self.input_topic}.*')
+#
+#     async def cache_frame_metadata(self, data):
+#         """Cache frame metadata in Redis asynchronously"""
+#         loop = asyncio.get_running_loop()
+#         try:
+#             await loop.run_in_executor(
+#                 None,
+#                 self._sync_cache_frame_metadata,
+#                 data
+#             )
+#         except Exception as e:
+#             self.logger.error(f"Caching failed: {str(e)}")
+#
+#     def _sync_cache_frame_metadata(self, data):
+#         key = f"frame_meta:{data['frame_id']}"
+#         value = {
+#             "seaweed_url": data["seaweed_url"],
+#             "timestamp": data["timestamp"]
+#         }
+#         self.redis_cli.hset(key, mapping=value)
+#         self.redis_cli.expire(key, 600)
+#
+#     async def is_duplicate(self, frame_id):
+#         """Check for duplicates asynchronously"""
+#         loop = asyncio.get_running_loop()
+#         try:
+#             return await loop.run_in_executor(
+#                 None,
+#                 self._sync_is_duplicate,
+#                 frame_id
+#             )
+#         except Exception as e:
+#             self.logger.error(f"Duplicate check failed: {str(e)}")
+#             return True  # Treat errors as duplicates to avoid duplicates
+#
+#     def _sync_is_duplicate(self, frame_id):
+#         key = f"frame:{frame_id}"
+#         if self.redis_cli.exists(key):
+#             return True
+#         self.redis_cli.setex(key, 600, "1")
+#         return False
+#
+#     async def process(self):
+#         try:
+#             await self.connect()
+#             await self.subscribe()
+#             self.logger.info("Router started")
+#
+#             while True:
+#                 try:
+#                     msg = await self.sub.next_msg(timeout=1.0)
+#                     await self.message_handler(msg)
+#                 except asyncio.TimeoutError:
+#                     pass
+#                 except Exception as e:
+#                     self.logger.error(f"Error receiving message: {str(e)}")
+#                     # Re-establish connection on error
+#                     await self.close_connection()
+#                     await self.connect()
+#                     await self.subscribe()
+#
+#         except KeyboardInterrupt:
+#             self.logger.info("Keyboard interrupt received, shutting down")
+#         except Exception as e:
+#             self.logger.error(f"Critical error: {str(e)}")
+#         finally:
+#             await self.close_connection()
+#
+#     async def publish(self, data):
+#         model_count = len(data["models"])
+#         for model in data["models"]:
+#             output_topic = f"{self.output_topic}.{model}"
+#
+#             message = {
+#                 "frame_id": data["frame_id"],
+#                 "seaweed_url": data["seaweed_url"],
+#                 "model": model,
+#                 "timestamp": time.time(),
+#                 "cached_key": f"frame_meta:{data['frame_id']}"
+#             }
+#
+#             print(f"Publishing message: {message}")
+#
+#             await self.nats_cli.publish(output_topic, json.dumps(message).encode())
+#
+#         self.logger.info(f"Routed frame {data['frame_id']} to {model_count} models")
+#
+#     async def message_handler(self, msg):
+#         """Handle incoming messages"""
+#         try:
+#             data = json.loads(msg.data.decode())
+#             self.logger.debug(f"Received message: {data['frame_id']}")
+#
+#             # Deduplicate
+#             if await self.is_duplicate(data["frame_id"]):
+#                 self.logger.debug(f"Duplicate frame skipped: {data['frame_id']}")
+#                 return
+#
+#             await self.cache_frame_metadata(data)
+#
+#             # Route to models
+#             await self.publish(data)
+#
+#         except Exception as e:
+#             self.logger.error(f"Error processing message: {str(e)}")
+#
+#
+# if __name__ == "__main__":
+#     router = Router()
+#     asyncio.run(router.process())

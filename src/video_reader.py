@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 import aiohttp
@@ -57,8 +58,18 @@ class AVReader(AbstractReader):
                 frame_count += 1
                 if self.skip_frames > 0 and frame_count % (self.skip_frames + 1) != 0:
                     continue
+
+                frame_number = frame_count
+                frame_time = float(frame.pts * frame.time_base)  # Временная метка в секундах
+
                 rgb_frame = frame.to_ndarray(format="bgr24")
-                yield rgb_frame
+                yield {
+                    'image': rgb_frame,
+                    'number': frame_number,
+                    'timestamp': frame_time
+                }
+                # rgb_frame = frame.to_ndarray(format="bgr24")
+                # yield rgb_frame
 
     def get_frame(self):
         """Возвращает следующий кадр как изображение"""
@@ -141,7 +152,18 @@ class OpencvVideoReader(AbstractReader):
 
         if not ret:
             return None
-        return frame
+
+        #return frame
+
+        frame_number = self.frames_processed
+        frame_time = self.video_stream.get(cv2.CAP_PROP_POS_MSEC) / 1000.0  # Переводим в секунд
+        self.frames_processed += 1
+
+        return {
+            'image': frame,
+            'number': frame_number,
+            'timestamp': frame_time
+        }
 
     def __iter__(self):
         return self
@@ -257,6 +279,8 @@ class ReaderManager:
         if reader_type is None:
             raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
 
+        self.models = os.getenv("MODELS", "yolov8,facenet").split(",")
+
         self.reader = VideoReaderFactory.create_reader(reader_type)
         self.uploader = SeaweedFSUploader()
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
@@ -279,10 +303,14 @@ class ReaderManager:
         try:
             with self.reader as stream:
                 while True:
-                    frame = stream.get_frame()
-                    if frame is None:
+                    frame_data = stream.get_frame()
+                    if frame_data is None:
                         logger.info("Конец видео стрима")
                         break
+
+                    frame = frame_data['image']
+                    frame_number = frame_data['number']
+                    frame_timestamp = frame_data['timestamp']
 
                     _, buffer = cv2.imencode('.jpg', frame)
                     image_data = buffer.tobytes()
@@ -290,10 +318,21 @@ class ReaderManager:
                     async with self.uploader as publisher:
                         try:
                             file_url = await publisher.upload_file(image_data)
-                            await nc.publish(self.topic, file_url.encode())
-                            logger.debug(f"Кадр загружен в бакет по ссылке: {file_url}")
+
+                            message = {
+                                "frame_id": f"frame_{frame_number:06d}",
+                                "seaweed_url": file_url,
+                                "models": self.models,
+                                "timestamp": frame_timestamp  # Используем время кадра
+                            }
+
+                            json_message = json.dumps(message).encode('utf-8')
+
+                            await nc.publish(self.topic, json_message)
+                            logger.debug(f"Отправлен кадр {frame_number}: {message}")
+
                         except (ConnectionClosedError, TimeoutError) as e:
-                            logger.error(f"Ошибка обработки кадра: {e}")
+                            logger.error(f"Ошибка обработки кадра {frame_number}: {e}")
 
         except KeyboardInterrupt:
             logger.info("Процесс обработки остановлен пользователем")
