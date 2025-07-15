@@ -52,12 +52,11 @@ class Router:
 
         # Используем callback для обработки сообщений
         self.sub = await self.nats_cli.subscribe(
-            subject="frames-stream",
+            subject=f"{self.topic_input}",
             cb=self.message_handler
         )
-        logger.info(f"Subscribed to {self.topic_input}.*")
+        logger.info(f"Subscribed to {self.topic_input}")
 
-    # Обработчик входящих сообщений
     async def message_handler(self, msg):
         subject = msg.subject
         data_str = msg.data.decode()

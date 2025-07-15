@@ -34,7 +34,7 @@ class AbstractReader(ABC):
 
 class FileUploader(ABC):
     @abstractmethod
-    async def upload_file(self, file_data: bytes, **kwargs) -> str:
+    async def upload_file(self, file_data: bytes) -> str:
         pass
 
     async def __aenter__(self):

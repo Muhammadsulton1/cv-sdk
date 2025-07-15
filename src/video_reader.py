@@ -18,6 +18,7 @@ class AVReader(AbstractReader):
         self.container = None
         self.video_stream = None
         self.frame_generator = None
+        self._frames_processed = 0  # Initialize frame counter
 
     def __enter__(self):
         self.open()
@@ -42,6 +43,7 @@ class AVReader(AbstractReader):
         self.width = video_stream.codec_context.width
         self.height = video_stream.codec_context.height
         self.framerate = float(video_stream.average_rate)
+        self._frames_processed = 0  # Reset counter when reopening
 
         # Инициализация генератора кадров
         self.frame_generator = self._generate_frames()
@@ -68,8 +70,7 @@ class AVReader(AbstractReader):
                     'number': frame_number,
                     'timestamp': frame_time
                 }
-                # rgb_frame = frame.to_ndarray(format="bgr24")
-                # yield rgb_frame
+                self._frames_processed += 1  # Increment processed counter
 
     def get_frame(self):
         """Возвращает следующий кадр как изображение"""
@@ -89,6 +90,11 @@ class AVReader(AbstractReader):
         return frame
 
     @property
+    def frames_processed(self):
+        """Возвращает количество обработанных кадров"""
+        return self._frames_processed
+
+    @property
     def info(self):
         return {
             "source": self.source,
@@ -96,7 +102,8 @@ class AVReader(AbstractReader):
             "width": self.width,
             "height": self.height,
             "framerate": self.framerate,
-            "frames_skipped": self.skip_frames
+            "frames_skipped": self.skip_frames,
+            "frames_processed": self.frames_processed  # Include processed count
         }
 
 
@@ -304,6 +311,7 @@ class ReaderManager:
             with self.reader as stream:
                 while True:
                     frame_data = stream.get_frame()
+                    meta_info = stream.info
                     if frame_data is None:
                         logger.info("Конец видео стрима")
                         break
@@ -323,7 +331,8 @@ class ReaderManager:
                                 "frame_id": f"frame_{frame_number:06d}",
                                 "seaweed_url": file_url,
                                 "models": self.models,
-                                "timestamp": frame_timestamp  # Используем время кадра
+                                "timestamp": frame_timestamp,
+                                "meta": meta_info
                             }
 
                             json_message = json.dumps(message).encode('utf-8')
