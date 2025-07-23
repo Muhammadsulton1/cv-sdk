@@ -53,9 +53,9 @@ class AbstractRouterManager(ABC):
                 max_reconnect_attempts=-1,
                 reconnect_time_wait=2
             )
-            logger.info("Connected to NATS")
+            logger.info("Подключения к NATS успешно")
         except Exception as e:
-            logger.error(f"NATS connection error: {e}")
+            logger.error(f"Подключения к NATS упал с ошибкой: {e}")
             raise
 
         try:
@@ -65,9 +65,9 @@ class AbstractRouterManager(ABC):
                 decode_responses=True
             )
             await self.redis.ping()
-            logger.info("Connected to Redis")
+            logger.info("Подключения к Redis успешно")
         except Exception as e:
-            logger.error(f"Redis connection error: {e}")
+            logger.error(f"Подключения к Redis упал с ошибкой: {e}")
             raise
 
     async def close(self):
@@ -78,7 +78,7 @@ class AbstractRouterManager(ABC):
             if self.redis:
                 await self.redis.close()
         except Exception as e:
-            logger.error(f"Shutdown error: {e}")
+            logger.error(f"Ошибка закрытия соединений: {e}")
         finally:
             await self.nats_cli.close()
 
@@ -108,9 +108,9 @@ class AbstractRouterManager(ABC):
             try:
                 models = await self._fetch_available_models()
                 self.available_models = set(models)
-                logger.info(f"Updated available models: {self.available_models}")
+                logger.info(f"Обновлен список доступных подписчиков: {self.available_models}")
             except Exception as e:
-                logger.error(f"Model update failed: {e}")
+                logger.error(f"Ошибка обновления доступных подписчиков: {e}")
             await asyncio.sleep(self.discovery_interval)
 
     async def subscribe(self):
@@ -122,7 +122,7 @@ class AbstractRouterManager(ABC):
             subject=f"{self.topic_input}",
             cb=self.message_handler
         )
-        logger.info(f"Subscribed to {self.topic_input}")
+        logger.info(f"Подписался на топик NATS: {self.topic_input}")
 
     async def message_handler(self, msg):
         """
@@ -136,7 +136,7 @@ class AbstractRouterManager(ABC):
         subject = msg.subject
         data_str = msg.data.decode()
         data = json.loads(data_str)
-        logger.info(f"Received message [{subject}]: {data}")
+        logger.info(f"Отправлено сообщение: [{subject}]: {data}")
 
         await self.publish(data)
 
@@ -158,7 +158,7 @@ class AbstractRouterManager(ABC):
         """
         selected_models = self._select_models(data)
         if not selected_models:
-            logger.warning("No models selected for routing")
+            logger.warning("Нет доступных живых подписчиков для перенаправления кадра")
             return
 
         for model in selected_models:
@@ -166,7 +166,7 @@ class AbstractRouterManager(ABC):
             message = self._prepare_message(data, model)
             await self.nats_cli.publish(output_topic, json.dumps(message).encode())
 
-        logger.info(f"Routed frame {data['frame_id']} to {len(selected_models)} models")
+        logger.info(f"Кадр перенаправлен {data['frame_id']} к {len(selected_models)} моделям")
 
     @abstractmethod
     async def process(self):

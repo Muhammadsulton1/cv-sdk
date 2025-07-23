@@ -32,7 +32,7 @@ class ModelInference(ABC):
                 await self.redis.expire("routing_to_models", int(os.getenv('routing_ttl', 10)))
                 await asyncio.sleep(int(os.getenv('routing_ttl', 10)))
             except Exception as e:
-                logger.error(f"Registration error: {e}")
+                logger.error(f"Ошибка регистрации подписчика {self.model_name} на публикации чтения кадров: {e}")
                 await asyncio.sleep(1)
 
     @abstractmethod
@@ -54,7 +54,6 @@ class ModelInference(ABC):
         """Запуск полного пайплайна обработки"""
         preprocessed = await self.preprocess(image)
         inference_result = await self.inference(preprocessed)
-        print(f'inference_result-{self.model_name}', inference_result)
         return await self.postprocess(inference_result)
 
     @staticmethod
@@ -62,7 +61,7 @@ class ModelInference(ABC):
         """Скачивание изображения по URL из словаря данных"""
         try:
             if not data.get('seaweed_url'):
-                raise ValueError("Missing seaweed_url in data")
+                raise ValueError("Нету seaweed_url в теле сообщений для скачивания изображения по ссылке")
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(data['seaweed_url']) as response:
@@ -71,7 +70,7 @@ class ModelInference(ABC):
                     return Image.open(io.BytesIO(image_data))
 
         except (aiohttp.ClientError, OSError, Image.DecompressionBombError) as e:
-            logger.error(f"Image download error: {str(e)}")
+            logger.error(f"Ошибка скачивания изображения: {str(e)}")
             raise
 
     async def message_handler(self, msg):
@@ -81,7 +80,7 @@ class ModelInference(ABC):
             data = json.loads(raw_data)
 
             if not data.get('seaweed_url'):
-                raise ValueError("Missing seaweed_url in message")
+                raise ValueError("Нету seaweed_url в теле сообщений для скачивания изображения по ссылке")
 
             image = await self.download_image(data)
             result = await self.run_pipeline(image)
@@ -98,14 +97,14 @@ class ModelInference(ABC):
             )
 
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON: {msg.data.decode()}")
+            logger.error(f"Ошибка декодирования сообщения в JSON: {msg.data.decode()}")
         except Exception as e:
-            logger.error(f"[{self.model_name}] Error: {str(e)}")
+            logger.error(f"Ошибка обработки в классе [{self.model_name}]: {str(e)}")
 
     async def connect_nats(self):
         """Подключение к NATS и подписка на тему"""
         self.nats_conn = await nats.connect(self.nats_host)
         await self.nats_conn.subscribe(self.model_name, cb=self.message_handler)
-        logger.info(f"[{self.model_name}] Subscribed to NATS topic: {self.model_name}")
+        logger.info(f"Подписка класса [{self.model_name}] на топик NATS: {self.model_name} успешно")
 
         await asyncio.create_task(self.register_service())

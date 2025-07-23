@@ -18,7 +18,7 @@ class AVReader(AbstractReader):
         self.container = None
         self.video_stream = None
         self.frame_generator = None
-        self._frames_processed = 0  # Initialize frame counter
+        self._frames_processed = 0
 
     def __enter__(self):
         self.open()
@@ -43,7 +43,7 @@ class AVReader(AbstractReader):
         self.width = video_stream.codec_context.width
         self.height = video_stream.codec_context.height
         self.framerate = float(video_stream.average_rate)
-        self._frames_processed = 0  # Reset counter when reopening
+        self._frames_processed = 0
 
         # Инициализация генератора кадров
         self.frame_generator = self._generate_frames()
@@ -62,7 +62,7 @@ class AVReader(AbstractReader):
                     continue
 
                 frame_number = frame_count
-                frame_time = float(frame.pts * frame.time_base)  # Временная метка в секундах
+                frame_time = float(frame.pts * frame.time_base)
 
                 rgb_frame = frame.to_ndarray(format="bgr24")
                 yield {
@@ -70,7 +70,7 @@ class AVReader(AbstractReader):
                     'number': frame_number,
                     'timestamp': frame_time
                 }
-                self._frames_processed += 1  # Increment processed counter
+                self._frames_processed += 1
 
     def get_frame(self):
         """Возвращает следующий кадр как изображение"""
@@ -103,7 +103,7 @@ class AVReader(AbstractReader):
             "height": self.height,
             "framerate": self.framerate,
             "frames_skipped": self.skip_frames,
-            "frames_processed": self.frames_processed  # Include processed count
+            "frames_processed": self.frames_processed
         }
 
 
@@ -160,8 +160,6 @@ class OpencvVideoReader(AbstractReader):
         if not ret:
             return None
 
-        #return frame
-
         frame_number = self.frames_processed
         frame_time = self.video_stream.get(cv2.CAP_PROP_POS_MSEC) / 1000.0  # Переводим в секунд
         self.frames_processed += 1
@@ -212,26 +210,33 @@ class SeaweedFSUploader(FileUploader):
             await self._session.close()
 
     async def upload_file(self, file_data: bytes) -> str:
-        assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
-        async with self._session.get(assign_url) as resp:
-            assign_data = await resp.json()
-            fid = assign_data["fid"]
+        try:
+            assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
+            async with self._session.get(assign_url) as resp:
+                assign_data = await resp.json()
+                fid = assign_data["fid"]
 
-        upload_url = f"{self.volume_url}/{self.bucket_name}/{fid}?ttl={self.ttl}"
-        file_name = f"{uuid.uuid4()}.jpg"
+            upload_url = f"{self.volume_url}/{self.bucket_name}/{fid}?ttl={self.ttl}"
+            file_name = f"{uuid.uuid4()}.jpg"
 
-        form_data = aiohttp.FormData()
-        form_data.add_field(
-            'file',
-            file_data,
-            filename=file_name,
-            content_type='image/jpeg'
-        )
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                'file',
+                file_data,
+                filename=file_name,
+                content_type='image/jpeg'
+            )
 
-        async with self._session.post(upload_url, data=form_data) as resp:
-            resp.raise_for_status()
+            async with self._session.post(upload_url, data=form_data) as resp:
+                resp.raise_for_status()
 
-        return f"{self.volume_url}/{self.bucket_name}/{fid}"
+            return f"{self.volume_url}/{self.bucket_name}/{fid}"
+        except (aiohttp.ClientError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as err:
+            logger.error(f"Ошибка подключения при загрузки кадра в SEAWEADFS: {err}")
+            raise err
+        except Exception as err:
+            logger.error(f"Ошибка при загрузки кадра в SEAWEADFS: {err}")
+            raise err
 
 
 class VideoReaderFactory:
@@ -299,7 +304,7 @@ class ReaderManager:
                 connect_timeout=5,
                 max_reconnect_attempts=3
             )
-            logger.info("Connected to NATS server")
+            logger.info("Подключения к NATS успешно")
 
         except Exception as e:
             logger.error(f"NATS соединение упало с ошибкой: {e}")
