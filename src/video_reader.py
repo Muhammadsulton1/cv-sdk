@@ -286,8 +286,6 @@ class ReaderManager:
         if reader_type is None:
             raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
 
-        self.models = os.getenv("MODELS", "yolov8,facenet").split(",")
-
         self.reader = VideoReaderFactory.create_reader(reader_type)
         self.uploader = SeaweedFSUploader()
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
@@ -330,7 +328,6 @@ class ReaderManager:
                             message = {
                                 "frame_id": f"frame_{frame_number:06d}",
                                 "seaweed_url": file_url,
-                                "models": self.models,
                                 "timestamp": frame_timestamp,
                                 "meta": meta_info
                             }

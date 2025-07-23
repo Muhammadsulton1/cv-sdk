@@ -2,13 +2,12 @@ import asyncio
 import numpy as np
 
 from typing import Any, Dict
-from abs_src.modules_interface import ModelInference
+from abs_src.abs_inference import ModelInference
 
 
 class DetectionInference(ModelInference):
     def __init__(self):
-        super().__init__("detection_inference")
-        #self.model = model('best.pt')
+        super().__init__()
 
     async def preprocess(self, image: np.ndarray) -> Any:
         """Пример предобработки для детекции лиц"""
@@ -16,7 +15,7 @@ class DetectionInference(ModelInference):
 
     async def inference(self, preprocessed_data: Any) -> Any:
         """Пример выполнения инференса"""
-        return {"boxes": [[10, 20, 100, 100]]}  # Пример результата
+        return {"boxes": [[10, 20, 100, 100]]}
 
     async def postprocess(self, inference_output: Any) -> Dict[str, Any]:
         """Постобработка результатов"""
@@ -34,7 +33,7 @@ class DetectionInference(ModelInference):
 
 class ClassificationInference(ModelInference):
     def __init__(self):
-        super().__init__("classification")
+        super().__init__()
 
     async def preprocess(self, image: np.ndarray) -> Any:
         return image.resize((224, 224))
@@ -55,11 +54,10 @@ async def main():
     face_detector = DetectionInference()
     classifier = ClassificationInference()
 
-    # Подключаемся к NATS
-    nats_servers = "nats://localhost:4222"
-    await face_detector.connect_nats(nats_servers, "inference_frames")
-    await classifier.connect_nats(nats_servers, "inference_frames")
-
+    await asyncio.gather(
+        face_detector.connect_nats(),
+        classifier.connect_nats()
+    )
     while True:
         await asyncio.sleep(1)
 

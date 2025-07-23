@@ -1,3 +1,6 @@
 av
 py-nats
 aiohttp
+redis
+opencv-python
+numpy==1.26.4
