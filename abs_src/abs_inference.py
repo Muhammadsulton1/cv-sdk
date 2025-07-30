@@ -197,7 +197,7 @@ class BaseInferenceModel(ABC):
                 await asyncio.sleep(1)
 
     @abstractmethod
-    async def preprocess(self, image: Any, *args, **kwargs) -> Any:
+    def preprocess(self, image: Any, *args, **kwargs) -> Any:
         """
             Абстрактный метод предобработки входных данных.
 
@@ -212,7 +212,7 @@ class BaseInferenceModel(ABC):
         pass
 
     @abstractmethod
-    async def postprocess(self, inference_output: Any, *args, **kwargs) -> Dict[str, Any]:
+    def postprocess(self, inference_output: Any, *args, **kwargs) -> Dict[str, Any]:
         """
             Абстрактный метод постобработки результатов.
 
@@ -286,7 +286,7 @@ class BaseInferenceModel(ABC):
                 raise ValueError("Missing 'seaweed_url' in message")
 
             image = await self.download_image(data['seaweed_url'])
-            result = await self.run_inference(image)
+            result = self.run_inference(image)
             logger.info(f"[{self.model_name}] {result}")
 
             response_topic = "inference.results"
@@ -314,7 +314,7 @@ class BaseInferenceModel(ABC):
         logger.info(f"Подписка класса [{self.model_name}] на топик NATS: {self.model_name} успешно")
         await asyncio.create_task(self.register_service())
 
-    async def run_inference(self, image: Any) -> Dict[str, Any]:
+    def run_inference(self, image: Any) -> Dict[str, Any]:
         """
             Полный пайплайн обработки изображения:
             1. Предобработка
@@ -327,6 +327,6 @@ class BaseInferenceModel(ABC):
             Returns:
                 Результаты обработки
         """
-        preprocessed = await self.preprocess(image)
+        preprocessed = self.preprocess(image)
         inference_result = self.inference(preprocessed)
-        return await self.postprocess(inference_result)
+        return self.postprocess(inference_result)

@@ -23,7 +23,7 @@ class YOLOModelTRT(TensorRTConverter, BaseInferenceModel):
     ) -> None:
         super().__init__(model_path, converted_path, input_name, output_name)
 
-    async def preprocess(self, image: Image.Image, image_size=640) -> np.ndarray:
+    def preprocess(self, image: Image.Image, image_size=640) -> np.ndarray:
         img = image.convert('RGB')
         transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
@@ -39,7 +39,7 @@ class YOLOModelTRT(TensorRTConverter, BaseInferenceModel):
             )
         return outputs[self.output_name]
 
-    async def postprocess(self, output, conf_threshold=0.25, iou_threshold=0.45, image_size=640):
+    def postprocess(self, output, conf_threshold=0.25, iou_threshold=0.45, image_size=640):
         output = output.transpose(0, 2, 1)
         predictions = output[0]
 
@@ -80,13 +80,13 @@ class YOLOModel(BaseInferenceModel):
         super().__init__()
         self.model = YOLO(model_path)
 
-    async def preprocess(self, image, **kwargs) -> np.ndarray:
+    def preprocess(self, image, **kwargs) -> np.ndarray:
         return image
 
     def inference(self, image: np.ndarray) -> Any:
         return self.model(image)
 
-    async def postprocess(self, output: Any, **kwargs) -> Dict[str, Any]:
+    def postprocess(self, output: Any, **kwargs) -> Dict[str, Any]:
         result = output[0]
         return {
             "boxes": result.boxes.xyxy.cpu().numpy().tolist(),
@@ -118,14 +118,14 @@ class YOLOModel(BaseInferenceModel):
 
 async def main():
     model = YOLOModel(model_path='yolo11n.pt')
-    img = cv2.imread('test1.jpg')
-    result = await model.run_inference(img)
+    img = cv2.imread('../test1.jpg')
+    result = model.run_inference(img)
     boxes = result["boxes"]
     for box in boxes:
         x, y, w, h = map(int, box)
         cv2.rectangle(img, (x, y), (w, h), (0, 255, 0))
 
-    cv2.imwrite('aa.jpg', img)
+    cv2.imwrite('../aa.jpg', img)
     print(result)
 
 
