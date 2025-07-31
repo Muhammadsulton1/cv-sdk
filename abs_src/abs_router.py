@@ -76,7 +76,7 @@ class AbstractRouterManager(ABC):
             if self.nats_cli.is_connected:
                 await self.nats_cli.drain()
             if self.redis:
-                await self.redis.close()
+                await self.redis.aclose()
         except Exception as e:
             logger.error(f"Ошибка закрытия соединений: {e}")
         finally:

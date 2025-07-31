@@ -62,9 +62,10 @@ class AbstractEventRegistrator(ABC):
         return Counter(task_list).most_common(1)[0][0]
 
     @staticmethod
-    def message_handler(msg):
+    async def message_handler(msg):
         """Асинхронный обработчик сообщений NATS."""
         data = json.loads(msg.data.decode())
+        logger.info(f'получено сообщение из топика inference.results {data}')
         return data
 
     async def connect_nats(self) -> None:
@@ -82,19 +83,34 @@ class AbstractEventRegistrator(ABC):
 
     async def close(self) -> None:
         """Корректно закрывает соединения."""
-        if self.nats_conn:
-            await self.nats_conn.drain()
-        await self.redis.close()
+        try:
+            if self.nats_conn and not self.nats_conn.is_closed:
+                await self.nats_conn.drain()
+        except Exception as e:
+            logger.error(f"Error draining NATS connection: {e}")
+        finally:
+            if self.redis:
+                await self.redis.aclose()
 
 
 class VideoWriter:
     def __init__(self):
-        self.video_frame_store = defaultdict(lambda: {
-            'frames': [],
-            'video_path': uuid4()
-        })
-        self.tmp_path = os.getenv('TMP_PATH', '/tmp/')
+        self.tmp_path = os.getenv("TMP_PATH")
         os.makedirs(self.tmp_path, exist_ok=True)
+        self.video_frame_store = defaultdict(self._create_video_entry)
+
+    def _create_video_entry(self):
+        """Создает новую запись для хранения видео-данных"""
+        event_uuid = str(uuid4())
+        event_dir = f'{self.tmp_path}/{str(event_uuid)}'
+        os.makedirs(event_dir, exist_ok=True)
+
+        return {
+            'frames': [],
+            'event_proof_name': event_uuid,
+            'frame_proof_path': f'{event_dir}/{event_uuid}.jpg',
+            'video_proof_path': f'{event_dir}/{event_uuid}.mp4'
+        }
 
     def add_frame(self, key: str, frame: np.ndarray) -> None:
         """Добавляет кадр в буфер для указанного ключа."""
@@ -102,10 +118,7 @@ class VideoWriter:
 
     def save_keyframe(self, key: str, frame: np.ndarray) -> None:
         """Сохраняет ключевой кадр как изображение."""
-        filename = os.path.join(
-            self.tmp_path,
-            f"{self.video_frame_store[key]['video_path']}.jpg"
-        )
+        filename = self.video_frame_store[key]['frame_proof_path']
         cv2.imwrite(filename, frame)
         logger.debug(f'Saved keyframe to {filename}')
 
@@ -119,10 +132,7 @@ class VideoWriter:
         self.save_keyframe(key, frames[0])
 
         height, width = frames[0].shape[:2]
-        video_filename = os.path.join(
-            self.tmp_path,
-            f"{self.video_frame_store[key]['video_path']}.mp4"
-        )
+        video_filename = self.video_frame_store[key]['video_proof_path']
 
         logger.debug(f'Начало записи видео для {key}')
 
@@ -174,7 +184,6 @@ class BasicEventRegistrator(AbstractEventRegistrator):
 
     async def register_task(self, key_name: str, message_event: dict) -> None:
         self.stop_task(key_name)
-        # Проверяем статус задачи перед сохранением
         if self.task_catalog[key_name]['task'] == 'DONE':
             try:
                 self.video_writer.save_video(key_name)
@@ -183,24 +192,29 @@ class BasicEventRegistrator(AbstractEventRegistrator):
                 logger.error(f"Video save failed for {key_name}: {e}")
                 self.task_catalog[key_name]['task'] = 'ERROR'
 
-        # Сохраняем событие в Redis
         try:
-            await self.redis.zadd('events', {json.dumps(message_event): time.time()})
+            data = {key_name: {'message': message_event, 'video_proofs': self.video_writer.video_frame_store[key_name]['video_proof_path'],
+                               'image_proof_path': self.video_writer.video_frame_store[key_name]['frame_proof_path']}}
+            await self.redis.zadd('events', {json.dumps(data): time.time()})
+            logger.info(f"Task Registered in redis")
         except Exception as e:
             logger.error(f"Redis save failed: {e}")
 
 
 async def main():
     registrator = BasicEventRegistrator()
-    while True:
-        await registrator.connect_nats()
-        try:
-            # Тестовая работа
-            registrator.add_video_frame('test', np.zeros((480, 640, 3), dtype=np.uint8))
-            await asyncio.sleep(5)
-        finally:
-            await registrator.close()
-
+    await registrator.connect_nats()
+    try:
+        while True:
+            try:
+                registrator.add_video_frame('test', np.zeros((480, 640, 3), dtype=np.uint8))
+                await registrator.register_task('test', {'bbox': [1, 2, 3, 4]})
+                await asyncio.sleep(5)
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                break
+    finally:
+        await registrator.close()
 
 if __name__ == '__main__':
     asyncio.run(main())
