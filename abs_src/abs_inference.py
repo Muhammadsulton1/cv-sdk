@@ -12,7 +12,10 @@ from polygraphy.backend.trt import CreateConfig, engine_from_network, NetworkFro
     EngineFromBytes, Profile
 from polygraphy.backend.common import BytesFromPath
 from PIL import Image
+from pydantic import ValidationError
 from redis.asyncio import Redis
+
+from src.data_scheme import InferenceOutputSchema
 from utils.logger import logger
 
 
@@ -112,7 +115,7 @@ class TensorRTConverter(AbstractConverter):
 
     def load_engine(self) -> None:
         """
-        Загружает предварительно сконвертированный TensorRT-движок.
+        Загружает предварительно конвертированный TensorRT-движок.
         """
         self.engine = EngineFromBytes(BytesFromPath(self.converted_path))
         self.loaded_engine = True
@@ -199,7 +202,7 @@ class BaseInferenceModel(ABC):
     @abstractmethod
     def preprocess(self, image: Any, *args, **kwargs) -> Any:
         """
-            Абстрактный метод предобработки входных данных.
+            Абстрактный метод пред обработки входных данных.
 
             Args:
                 image: Входное изображение
@@ -287,20 +290,24 @@ class BaseInferenceModel(ABC):
 
             image = await self.download_image(data['seaweed_url'])
             result = self.run_inference(image)
-            logger.info(f"[{self.model_name}] {result}")
 
-            response_topic = "inference.results"
-            await self.nats_conn.publish(
-                response_topic,
-                json.dumps({
-                    "model": self.model_name,
-                    "result": result,
-                    "frame_id": data.get('frame_id', 'unknown')
-                }).encode()
-            )
+            parsed_result = InferenceOutputSchema(**result)
+
+            if parsed_result:
+                response_topic = "inference.results"
+                await self.nats_conn.publish(
+                    response_topic,
+                    json.dumps({
+                        "model": self.model_name,
+                        "result": result,
+                        "frame_id": data.get('frame_id', 'unknown')
+                    }).encode()
+                )
 
         except json.JSONDecodeError:
             logger.error(f"JSON decode error: {msg.data.decode()}")
+        except ValidationError as e:
+            logger.error(f"Ошибка валидации данных, конечный результат не соответствует InferenceDataSchema, Ошибка: {e}")
         except Exception as e:
             logger.error(f"Processing error [{self.model_name}]: {str(e)}")
 
@@ -317,7 +324,7 @@ class BaseInferenceModel(ABC):
     def run_inference(self, image: Any) -> Dict[str, Any]:
         """
             Полный пайплайн обработки изображения:
-            1. Предобработка
+            1. Пред обработка
             2. Инференс
             3. Постобработка
 

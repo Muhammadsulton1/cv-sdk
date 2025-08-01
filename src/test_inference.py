@@ -23,7 +23,7 @@ class YOLOModelTRT(TensorRTConverter, BaseInferenceModel):
     ) -> None:
         super().__init__(model_path, converted_path, input_name, output_name)
 
-    def preprocess(self, image: Image.Image, image_size=640) -> np.ndarray:
+    def preprocess(self, image: Image.Image, *args, image_size=640) -> np.ndarray:
         img = image.convert('RGB')
         transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),

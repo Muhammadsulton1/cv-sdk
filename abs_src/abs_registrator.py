@@ -189,32 +189,40 @@ class BasicEventRegistrator(AbstractEventRegistrator):
                 self.video_writer.save_video(key_name)
                 self.task_catalog[key_name]['task'] = 'FINISHED'
             except Exception as e:
-                logger.error(f"Video save failed for {key_name}: {e}")
+                logger.error(f"Ошибка записи видео для ключа {key_name}: {e}")
                 self.task_catalog[key_name]['task'] = 'ERROR'
 
         try:
-            data = {key_name: {'message': message_event, 'video_proofs': self.video_writer.video_frame_store[key_name]['video_proof_path'],
+            data = {key_name: {'message': message_event,
+                               'video_proofs': self.video_writer.video_frame_store[key_name]['video_proof_path'],
                                'image_proof_path': self.video_writer.video_frame_store[key_name]['frame_proof_path']}}
             await self.redis.zadd('events', {json.dumps(data): time.time()})
-            logger.info(f"Task Registered in redis")
+            logger.info(f"Задача зарегистрирована в редисе")
         except Exception as e:
-            logger.error(f"Redis save failed: {e}")
+            logger.error(f"Ошибка записи в редис: {e}")
 
 
-async def main():
-    registrator = BasicEventRegistrator()
-    await registrator.connect_nats()
-    try:
-        while True:
-            try:
-                registrator.add_video_frame('test', np.zeros((480, 640, 3), dtype=np.uint8))
-                await registrator.register_task('test', {'bbox': [1, 2, 3, 4]})
-                await asyncio.sleep(5)
-            except KeyboardInterrupt:
-                logger.info("Shutting down...")
-                break
-    finally:
-        await registrator.close()
+class EventRegistrator(BasicEventRegistrator):
+    @abstractmethod
+    def process(self, inference_result: dict) -> None:
+        pass
 
-if __name__ == '__main__':
-    asyncio.run(main())
+
+# async def main():
+#     registrator = BasicEventRegistrator()
+#     await registrator.connect_nats()
+#     try:
+#         while True:
+#             try:
+#                 registrator.add_video_frame('test', np.zeros((480, 640, 3), dtype=np.uint8))
+#                 await registrator.register_task('test', {'bbox': [1, 2, 3, 4]})
+#                 await asyncio.sleep(5)
+#             except KeyboardInterrupt:
+#                 logger.info("Shutting down...")
+#                 break
+#     finally:
+#         await registrator.close()
+
+
+# if __name__ == '__main__':
+#     asyncio.run(main())

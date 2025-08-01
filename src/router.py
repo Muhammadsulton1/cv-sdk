@@ -55,7 +55,7 @@ class RouterManager(AbstractRouterManager):
                 Бесконечный цикл обработки событий
         """
         await self.subscribe()
-        #await asyncio.create_task(self._update_available_models())
+        # await asyncio.create_task(self._update_available_models())
         await asyncio.create_task(self._update_available_models())
         logger.info("Сервис RoutingManager успешно запущен")
         while True:
