@@ -88,11 +88,27 @@ class YOLOModel(BaseInferenceModel):
 
     def postprocess(self, output: Any, **kwargs) -> Dict[str, Any]:
         result = output[0]
-        return {
-            "boxes": result.boxes.xyxy.cpu().numpy().tolist(),
-            "scores": result.boxes.conf.cpu().numpy().tolist(),
-            "class_ids": result.boxes.cls.cpu().numpy().astype(int).tolist()
-        }
+
+        classes = result.boxes.cls.cpu().numpy().astype(int).tolist()
+        boxes = result.boxes.xyxy.cpu().numpy().tolist()
+        scores = result.boxes.conf.cpu().numpy().tolist()
+
+        predictions = {}
+        for idx in range(len(classes)):
+            cls_id = classes[idx]
+            box = boxes[idx]
+            score = scores[idx]
+
+            if cls_id not in predictions:
+                predictions[cls_id] = {
+                    "boxes": [],
+                    "score": [],
+                }
+
+            predictions[cls_id]["boxes"].append(box)
+            predictions[cls_id]["score"].append(score)
+
+        return {"predictions": predictions}
 
 
 # async def main():
@@ -118,15 +134,7 @@ class YOLOModel(BaseInferenceModel):
 
 async def main():
     model = YOLOModel(model_path='yolo11n.pt')
-    img = cv2.imread('../test1.jpg')
-    result = model.run_inference(img)
-    boxes = result["boxes"]
-    for box in boxes:
-        x, y, w, h = map(int, box)
-        cv2.rectangle(img, (x, y), (w, h), (0, 255, 0))
-
-    cv2.imwrite('../aa.jpg', img)
-    print(result)
+    await model.connect_nats()
 
 
 if __name__ == "__main__":

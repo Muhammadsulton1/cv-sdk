@@ -208,6 +208,11 @@ class EventRegistrator(BasicEventRegistrator):
         pass
 
 
+class ExampleEventRegistrator(EventRegistrator):
+
+    def process(self, inference_result: dict) -> None:
+        print(inference_result)
+
 # async def main():
 #     registrator = BasicEventRegistrator()
 #     await registrator.connect_nats()
