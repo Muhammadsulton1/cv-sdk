@@ -1,14 +1,17 @@
-import asyncio
-import json
 import os
 import time
-from abc import ABC, abstractmethod
-from uuid import uuid4
-from collections import defaultdict, Counter
+import json
 import av
+import asyncio
 import cv2
 import nats
 import numpy as np
+
+from abc import ABC, abstractmethod
+from typing import Dict
+from uuid import uuid4
+from collections import defaultdict, Counter
+from nats.aio.errors import ErrTimeout, ErrConnectionClosed, ErrNoServers, ErrBadSubscription
 from redis.asyncio import Redis
 from utils.logger import logger
 
@@ -26,6 +29,7 @@ class AbstractEventRegistrator(ABC):
             'status': [],
         })
         self._nats_connected = False
+        self._last_inference_data = None
 
     @abstractmethod
     def create_task(self, key_name: str) -> None:
@@ -61,11 +65,11 @@ class AbstractEventRegistrator(ABC):
             return False
         return Counter(task_list).most_common(1)[0][0]
 
-    @staticmethod
-    async def message_handler(msg):
+    async def message_handler(self, msg):
         """Асинхронный обработчик сообщений NATS."""
         data = json.loads(msg.data.decode())
-        logger.info(f'получено сообщение из топика inference.results {data}')
+        logger.debug(f'получено сообщение из топика inference.results {data}')
+        self._last_inference_data = data
         return data
 
     async def connect_nats(self) -> None:
@@ -73,24 +77,37 @@ class AbstractEventRegistrator(ABC):
         if self._nats_connected:
             return
 
-        self.nats_conn = await nats.connect(
-            servers=os.getenv("NATS_HOST", "nats://localhost:4222").split(","),
-            max_reconnect_attempts=5
-        )
-        await self.nats_conn.subscribe('inference.results', cb=self.message_handler)
-        self._nats_connected = True
-        logger.info("Подписка на топик NATS 'inference.results' успешно установлена")
+        try:
+            self.nats_conn = await nats.connect(
+                servers=os.getenv("NATS_HOST", "nats://localhost:4222").split(","),
+                max_reconnect_attempts=5
+            )
+            await self.nats_conn.subscribe('inference.results', cb=self.message_handler)
+            self._nats_connected = True
+            logger.info("Подписка на топик NATS 'inference.results' успешно установлена")
+        except (ErrTimeout, ErrConnectionClosed, ErrNoServers, ErrBadSubscription) as err:
+            logger.error(f"Ошибка подключения и подписка на inference.results: {err}")
+            await self.close()
+
+    @property
+    def inference_data(self) -> Dict:
+        """Возвращает результат из последнего полученного сообщения."""
+        if self._last_inference_data is None:
+            return {}
+        return self._last_inference_data.get('result')
 
     async def close(self) -> None:
         """Корректно закрывает соединения."""
         try:
             if self.nats_conn and not self.nats_conn.is_closed:
                 await self.nats_conn.drain()
+                self.nats_conn = None
         except Exception as e:
             logger.error(f"Error draining NATS connection: {e}")
         finally:
             if self.redis:
                 await self.redis.aclose()
+                self.redis = None
 
 
 class VideoWriter:
@@ -203,31 +220,17 @@ class BasicEventRegistrator(AbstractEventRegistrator):
 
 
 class EventRegistrator(BasicEventRegistrator):
+    async def start_process(self):
+        await self.connect_nats()
+        try:
+            while True:
+                self.process()
+                await asyncio.sleep(0.005)
+        except KeyboardInterrupt:
+            print("Остановлено пользователем")
+        finally:
+            await self.close()
+
     @abstractmethod
-    def process(self, inference_result: dict) -> None:
+    def process(self) -> None:
         pass
-
-
-class ExampleEventRegistrator(EventRegistrator):
-
-    def process(self, inference_result: dict) -> None:
-        print(inference_result)
-
-# async def main():
-#     registrator = BasicEventRegistrator()
-#     await registrator.connect_nats()
-#     try:
-#         while True:
-#             try:
-#                 registrator.add_video_frame('test', np.zeros((480, 640, 3), dtype=np.uint8))
-#                 await registrator.register_task('test', {'bbox': [1, 2, 3, 4]})
-#                 await asyncio.sleep(5)
-#             except KeyboardInterrupt:
-#                 logger.info("Shutting down...")
-#                 break
-#     finally:
-#         await registrator.close()
-
-
-# if __name__ == '__main__':
-#     asyncio.run(main())

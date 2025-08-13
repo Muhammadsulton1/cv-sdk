@@ -304,7 +304,8 @@ class BaseInferenceModel(ABC):
                     json.dumps({
                         "model": self.model_name,
                         "result": result,
-                        "frame_id": data.get('frame_id', 'unknown')
+                        "frame_id": data.get('frame_id', 'unknown'),
+                        "frame_url": data.get('seaweed_url')
                     }).encode()
                 )
 

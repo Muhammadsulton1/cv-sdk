@@ -24,10 +24,10 @@ stream_handler = logging.StreamHandler()
 stream_handler.setLevel(logging.INFO)
 stream_handler.setFormatter(formatter)
 
-# Файл с ротацией по размеру (20 МБ, до 5 старых файлов)
+# Файл с ротацией по размеру (2 МБ, до 5 старых файлов)
 file_handler = RotatingFileHandler(
     LOG_FILE,
-    maxBytes=20 * 1024 * 1024,  # 20 MB
+    maxBytes=20 * 1024,  # 2 MB
     backupCount=5,
     encoding="utf-8"
 )

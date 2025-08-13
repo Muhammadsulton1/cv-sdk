@@ -133,7 +133,7 @@ class YOLOModel(BaseInferenceModel):
 
 
 async def main():
-    model = YOLOModel(model_path='yolo11n.pt')
+    model = YOLOModel(model_path='../weights/yolo11n.pt')
     await model.connect_nats()
 
 
