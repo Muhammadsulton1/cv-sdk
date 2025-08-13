@@ -27,6 +27,7 @@ class RouterManager(AbstractRouterManager):
         available_models (set): Множество доступных моделей
         discovery_interval (int): Интервал обновления моделей (сек)
     """
+
     async def _fetch_available_models(self) -> set:
         """Получение моделей из Redis"""
         return await self.redis.smembers(self.service_key)
@@ -44,6 +45,7 @@ class RouterManager(AbstractRouterManager):
     def _select_models(self, data: dict) -> set:
         """Выбор всех доступных моделей по умолчанию"""
         return self.available_models
+
 
     async def process(self):
         """

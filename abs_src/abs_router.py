@@ -10,6 +10,8 @@ from redis.asyncio import ConnectionError as RedisConnectionError
 from redis import RedisError
 from nats.aio.client import Client as NATS
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout, ErrBadSubscription
+
+from utils.decorators import measure_latency_sync, measure_latency_async
 from utils.logger import logger
 
 
@@ -135,6 +137,7 @@ class AbstractRouterManager(ABC):
         """Абстрактный метод для выбора моделей обработки"""
         pass
 
+    @measure_latency_async()
     async def _update_available_models(self) -> None:
         """
           Периодически обновляет список доступных моделей из Redis.
@@ -151,6 +154,7 @@ class AbstractRouterManager(ABC):
                 logger.error(f"Ошибка обновления доступных подписчиков: {e}")
             await asyncio.sleep(self.discovery_interval)
 
+    @measure_latency_async()
     async def subscribe(self) -> None:
         """Подписывается на входной топик NATS для обработки сообщений."""
         if not self.nats_cli.is_connected:
@@ -166,6 +170,7 @@ class AbstractRouterManager(ABC):
             logger.error("Не смог подписаться на заданный топик", str(err))
             raise
 
+    @measure_latency_async()
     async def message_handler(self, msg) -> None:
         """
           Обработчик входящих сообщений из NATS.
@@ -182,6 +187,7 @@ class AbstractRouterManager(ABC):
 
         await self.publish(data)
 
+    @measure_latency_async()
     async def publish(self, data: Dict[str, Any]) -> None:
         """
         Публикует сообщения для всех доступных моделей.

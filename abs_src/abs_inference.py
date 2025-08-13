@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from src.data_scheme import InferenceOutputSchema
+from utils.decorators import measure_latency_async, measure_latency_sync
 from utils.logger import logger
 
 
@@ -185,6 +186,7 @@ class BaseInferenceModel(ABC):
         """
         return cls.__name__
 
+    @measure_latency_async()
     async def register_service(self) -> None:
         """
         Регистрирует модель в Redis для маршрутизации.
@@ -243,6 +245,7 @@ class BaseInferenceModel(ABC):
         pass
 
     @staticmethod
+    @measure_latency_async()
     async def download_image(url: str) -> Image.Image:
         """
             Скачивает изображение по URL.
@@ -267,6 +270,7 @@ class BaseInferenceModel(ABC):
             logger.error(f"Image download failed: {err}")
             raise
 
+    @measure_latency_async()
     async def message_handler(self, msg) -> None:
         """
             Обработчик входящих сообщений из NATS.
@@ -321,6 +325,7 @@ class BaseInferenceModel(ABC):
         logger.info(f"Подписка класса [{self.model_name}] на топик NATS: {self.model_name} успешно")
         await asyncio.create_task(self.register_service())
 
+    @measure_latency_sync()
     def run_inference(self, image: Any) -> Dict[str, Any]:
         """
             Полный пайплайн обработки изображения:

@@ -11,6 +11,7 @@ from nats.errors import ConnectionClosedError, TimeoutError
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
 from abs_src.abs_reader import AbstractReader, FileUploader
 from utils.logger import logger
+from utils.decorators import measure_latency_sync, measure_latency_async
 
 
 class AVReader(AbstractReader):
@@ -53,6 +54,7 @@ class AVReader(AbstractReader):
         if self.container:
             self.container.close()
 
+    @measure_latency_sync()
     def _generate_frames(self):
         """Приватный генератор кадров"""
         frame_count = 0
@@ -73,6 +75,7 @@ class AVReader(AbstractReader):
                 }
                 self._frames_processed += 1
 
+    @measure_latency_sync()
     def get_frame(self):
         """Возвращает следующий кадр как изображение"""
         try:
@@ -148,6 +151,7 @@ class OpencvVideoReader(AbstractReader):
             self.video_stream.release()
         self.video_stream = None
 
+    @measure_latency_sync()
     def get_frame(self):
         """Возвращает следующий кадр с учетом skip_frames."""
         for _ in range(self.skip_frames):
@@ -221,6 +225,7 @@ class SeaweedFSUploader(FileUploader):
                 logger.error(f"Ошибка при загрузки кадра в SEAWEADFS: {e}")
                 logger.error(f"Попытка {attempt + 1} из {max_retries}")
 
+    @measure_latency_async()
     async def upload(self, file_data: bytes) -> str:
         try:
             assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
