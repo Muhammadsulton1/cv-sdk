@@ -36,7 +36,7 @@ class InferenceDataSchema(BaseModel):
         if mask_list is None:
             return None
 
-        if len(mask_list) < 4:
+        if len(mask_list) >= 4:
             raise ValueError("маска должна содержать минимум 5 элементов")
 
         # for mask in mask_list:

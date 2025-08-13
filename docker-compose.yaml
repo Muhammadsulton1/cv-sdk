@@ -1,5 +1,4 @@
 version: '3.7'
-
 services:
   master:
     image: chrislusf/seaweedfs:3.93
@@ -39,7 +38,6 @@ services:
     networks:
       - seaweed-net
 
-
   nats:
     image: nats:latest
     ports:
@@ -51,11 +49,46 @@ services:
     ports:
       - "6379:6379"
 
+#  data_reader:
+#    image: sdk:v1
+#    volumes:
+#      - ./video:/video
+#      - /services:/services
+#    command: python /services/data_reader/app.py
+#    container_name: EnviDataReader
+#    environment:
+#      - .env
+#    networks:
+#      - sdk_net
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 200M    # Ограничение по памяти в 100 МБ
+#          cpus: "0.5"
+#
+#  data_router:
+#    image: sdk:v1
+#    volumes:
+#      - /services:/services
+#    command: python /services/data_router/app.py
+#    container_name: EnviDataRouter
+#    environment:
+#      - .env
+#    networks:
+#      - sdk_net
+#    depends_on:
+#      - data_reader
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 200M    # Ограничение по памяти в 100 МБ
+#          cpus: "0.5"
+
+
 
 volumes:
   master_data:
   volume1_data:
-  volume2_data:
 
 networks:
   seaweed-net:

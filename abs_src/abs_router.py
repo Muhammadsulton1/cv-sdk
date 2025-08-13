@@ -2,9 +2,31 @@ import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Set, Dict, Any, Optional
+
 from redis.asyncio import Redis
+from redis.asyncio import ConnectionError as RedisConnectionError
+from redis import RedisError
 from nats.aio.client import Client as NATS
+from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout, ErrBadSubscription
 from utils.logger import logger
+
+
+@dataclass
+class RouterConfig:
+    """Конфигурация роутера"""
+    nats_hosts: list[str]
+    redis_host: str
+    redis_port: int
+    redis_password: Optional[str] = None
+    redis_ssl: bool = False
+    topic_input: Optional[str] = None
+    service_key: str = "routing_to_models"
+    discovery_interval: int = 30
+    max_message_size: int = 1024 * 1024  # 1MB
+    retry_attempts: int = 3
+    retry_delay: float = 1.0
 
 
 class AbstractRouterManager(ABC):
@@ -20,6 +42,7 @@ class AbstractRouterManager(ABC):
         self.nats_host = os.getenv("nats_host", "nats://localhost:4222").split(",")
         self.redis_host = os.getenv('redis_host', 'localhost')
         self.redis_port = int(os.getenv('redis_port', 6379))
+        self.redis_password = os.getenv('redis_password', '12345abc!')
         self.service_key = "routing_to_models"
 
         self.nats_cli = None
@@ -39,36 +62,49 @@ class AbstractRouterManager(ABC):
         await self.close()
         return None
 
-    async def connect(self):
+    async def connect_nats(self) -> None:
         """
-        Устанавливает подключения к NATS и Redis.
-
-        Выбрасывает:
-            Exception: При ошибках подключения
+            Устанавливает подключение к Redis
+            Выбрасывает:
+                Exception: При ошибках подключения
         """
         self.nats_cli = NATS()
         try:
             await self.nats_cli.connect(
                 servers=self.nats_host,
                 max_reconnect_attempts=-1,
-                reconnect_time_wait=2
+                reconnect_time_wait=10,
             )
-            logger.info("Подключения к NATS успешно")
-        except Exception as e:
-            logger.error(f"Подключения к NATS упал с ошибкой: {e}")
+        except (ErrConnectionClosed, ErrNoServers, ErrTimeout) as err:
+            logger.error(f"NATS не удалось подключиться: {err}")
+            self.nats_cli = None
             raise
 
+    async def connect_redis(self) -> None:
+        """
+        Устанавливает подключение к Redis
+        Выбрасывает:
+            Exception: При ошибках подключения
+        """
         try:
-            self.redis = Redis(
-                host=self.redis_host,
-                port=self.redis_port,
-                decode_responses=True
-            )
-            await self.redis.ping()
-            logger.info("Подключения к Redis успешно")
-        except Exception as e:
-            logger.error(f"Подключения к Redis упал с ошибкой: {e}")
+            self.redis = Redis(host=self.redis_host,
+                               port=self.redis_port,
+                               socket_connect_timeout=5,
+                               decode_responses=True)
+        except (RedisError, RedisConnectionError) as err:
+            logger.error(f"Redis не удалось подключиться: {err}")
+            self.redis = None
             raise
+
+    async def connect(self):
+        """
+         Устанавливает подключения к NATS и Redis.
+
+         Выбрасывает:
+             Exception: При ошибках подключения
+         """
+        await self.connect_nats()
+        await self.connect_redis()
 
     async def close(self):
         """Корректно закрывает подключения к NATS и Redis."""
@@ -81,23 +117,25 @@ class AbstractRouterManager(ABC):
             logger.error(f"Ошибка закрытия соединений: {e}")
         finally:
             await self.nats_cli.close()
+            self.redis = None
+            self.nats_cli = None
 
     @abstractmethod
-    async def _fetch_available_models(self) -> set:
+    async def _fetch_available_models(self) -> Set[str]:
         """Абстрактный метод для получения списка доступных моделей"""
         pass
 
     @abstractmethod
-    def _prepare_message(self, data: dict, model: str) -> dict:
+    def _prepare_message(self, data: Dict[str, Any], model: str) -> Dict[str, Any]:
         """Абстрактный метод для подготовки сообщения к публикации"""
         pass
 
     @abstractmethod
-    def _select_models(self, data: dict) -> set:
+    def _select_models(self, data: Dict[str, Any]) -> Set[str]:
         """Абстрактный метод для выбора моделей обработки"""
         pass
 
-    async def _update_available_models(self):
+    async def _update_available_models(self) -> None:
         """
           Периодически обновляет список доступных моделей из Redis.
 
@@ -113,18 +151,22 @@ class AbstractRouterManager(ABC):
                 logger.error(f"Ошибка обновления доступных подписчиков: {e}")
             await asyncio.sleep(self.discovery_interval)
 
-    async def subscribe(self):
+    async def subscribe(self) -> None:
         """Подписывается на входной топик NATS для обработки сообщений."""
         if not self.nats_cli.is_connected:
             return
 
-        self.sub = await self.nats_cli.subscribe(
-            subject=f"{self.topic_input}",
-            cb=self.message_handler
-        )
-        logger.info(f"Подписался на топик NATS: {self.topic_input}")
+        try:
+            self.sub = await self.nats_cli.subscribe(
+                subject=f"{self.topic_input}",
+                cb=self.message_handler
+            )
+            logger.info(f"Подписался на топик NATS: {self.topic_input}")
+        except ErrBadSubscription as err:
+            logger.error("Не смог подписаться на заданный топик", str(err))
+            raise
 
-    async def message_handler(self, msg):
+    async def message_handler(self, msg) -> None:
         """
           Обработчик входящих сообщений из NATS.
 
@@ -136,11 +178,11 @@ class AbstractRouterManager(ABC):
         subject = msg.subject
         data_str = msg.data.decode()
         data = json.loads(data_str)
-        logger.info(f"Отправлено сообщение: [{subject}]: {data}")
+        logger.debug(f"Отправлено сообщение: [{subject}]: {data}")
 
         await self.publish(data)
 
-    async def publish(self, data):
+    async def publish(self, data: Dict[str, Any]) -> None:
         """
         Публикует сообщения для всех доступных моделей.
 
@@ -166,7 +208,7 @@ class AbstractRouterManager(ABC):
             message = self._prepare_message(data, model)
             await self.nats_cli.publish(output_topic, json.dumps(message).encode())
 
-        logger.info(f"Кадр перенаправлен {data['frame_id']} к {len(selected_models)} моделям")
+        logger.debug(f"Кадр перенаправлен {data['frame_id']} на инференс {selected_models} моделям")
 
     @abstractmethod
     async def process(self):

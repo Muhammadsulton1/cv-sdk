@@ -8,6 +8,7 @@ import cv2
 import nats
 
 from nats.errors import ConnectionClosedError, TimeoutError
+from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
 from abs_src.abs_reader import AbstractReader, FileUploader
 from utils.logger import logger
 
@@ -209,7 +210,18 @@ class SeaweedFSUploader(FileUploader):
         if self._session:
             await self._session.close()
 
-    async def upload_file(self, file_data: bytes) -> str:
+    async def upload_file(self, file_data: bytes, max_retries: int = 3) -> str:
+        for attempt in range(max_retries):
+            try:
+                return await self.upload(file_data)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+                logger.error(f"Ошибка при загрузки кадра в SEAWEADFS: {e}")
+                logger.error(f"Попытка {attempt + 1} из {max_retries}")
+
+    async def upload(self, file_data: bytes) -> str:
         try:
             assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
             async with self._session.get(assign_url) as resp:
@@ -276,7 +288,7 @@ class VideoReaderFactory:
         :param reader_class: Класс ридера (должен быть вызываемым)
         """
         if not callable(reader_class):
-            raise TypeError("Reader class должен быть вызываемым объектом")
+            raise TypeError("VideoReader class должен быть вызываемым объектом")
         cls._readers[reader_type.lower()] = reader_class
 
     @classmethod
@@ -306,8 +318,8 @@ class ReaderManager:
             )
             logger.info("Подключения к NATS успешно")
 
-        except Exception as e:
-            logger.error(f"NATS соединение упало с ошибкой: {e}")
+        except (ErrConnectionClosed, ErrNoServers, ErrTimeout, ConnectionClosedError, TimeoutError) as err:
+            logger.error(f"NATS соединение упало с ошибкой: {err}")
             return
 
         try:
@@ -353,6 +365,7 @@ class ReaderManager:
             if nc and not nc.is_closed:
                 await nc.drain()
                 await nc.close()
+                nc = None
                 logger.info("NATS соединение закрыто")
 
     def process(self):

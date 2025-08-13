@@ -5,8 +5,10 @@ import os
 class AbstractReader(ABC):
     def __init__(self):
         self.source = os.getenv('video_source')  # будет взято из конфига
-        self.skip_frames = int(os.getenv('video_skip_frames'))  # будет взято из конфига
-        self.stream_index = int(os.getenv('video_index'))  # будет взято из конфига
+        if not self.source:
+            raise ValueError("Источник видео не установлен")
+        self.skip_frames = int(os.getenv('video_skip_frames', 0))  # будет взято из конфига
+        self.stream_index = int(os.getenv('video_index', 0))  # будет взято из конфига
         self.is_open = False
 
     @abstractmethod
