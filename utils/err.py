@@ -17,3 +17,6 @@ class S3ConnectionError(S3Error):
 class S3BucketError(S3Error):
     pass
 
+
+class NatsError(Exception):
+    pass

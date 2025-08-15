@@ -6,7 +6,7 @@ import aiohttp
 
 from PIL import Image
 from utils.decorators import measure_latency_async
-from utils.err import S3UploadError
+from utils.err import S3UploadError, S3DownloadError
 from utils.logger import logger
 
 
@@ -87,6 +87,6 @@ class SeaweedFSManager:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             logger.error(f"Сетевая ошибка при скачивании данных из S3: {type(err).__name__} - {str(err)}")
             raise err
-        except S3UploadError as err:
+        except S3DownloadError as err:
             logger.error(f"Ошибка скачивания данных из S3: {type(err).__name__} - {str(err)}")
             raise err

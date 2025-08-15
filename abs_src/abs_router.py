@@ -205,5 +205,5 @@ class AbstractRouterManager(ABC):
         logger.debug(f"Кадр перенаправлен {data['frame_id']} на инференс {selected_models} моделям")
 
     @abstractmethod
-    async def process(self):
+    def process(self):
         pass

@@ -186,7 +186,7 @@ class BaseInferenceModel(ABC):
 
     async def close(self) -> None:
         logger.info(f'Инициализирована закрытие всех соединений для {self.model_name}')
-        if self.nats_conn:
+        if self.nats_conn and not self.nats_conn.is_closed:
             await self.nats_conn.drain()
             await self.nats_conn.close()
             self.nats_conn = None

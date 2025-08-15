@@ -1,10 +1,6 @@
-import asyncio
-
+from src.basic_runner import BasicRunner
 from src.router import RouterManager
 
 if __name__ == '__main__':
-    async def main():
-        async with RouterManager() as router:
-            await router.process()
+    BasicRunner().run_process(processors=[RouterManager()])
 
-    asyncio.run(main())

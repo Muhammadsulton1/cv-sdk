@@ -1,16 +1,17 @@
 import asyncio
 import json
 import os
-
 import av
 import cv2
 import nats
 
 from nats.errors import ConnectionClosedError, TimeoutError
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
+
 from abs_src.abs_reader import AbstractReader
 from src.s3_storage import SeaweedFSManager
 from src.singeleton.yaml_reader import YamlReader
+from utils.err import NatsError
 from utils.logger import logger
 from utils.decorators import measure_latency_sync
 
@@ -258,20 +259,25 @@ class ReaderManager:
         self.setup_config = YamlReader()
         self.topic = self.setup_config.get('DataReader')['out_channel']
 
-    async def main(self):
-        nc = None
-        try:
-            nc = await nats.connect(
-                servers=[self.nats_url],
-                connect_timeout=5,
-                max_reconnect_attempts=3
-            )
-            logger.info("Подключения к NATS успешно")
+        self.nats_cli = None
 
-        except (ErrConnectionClosed, ErrNoServers, ErrTimeout, ConnectionClosedError, TimeoutError) as err:
-            logger.error(f"NATS соединение упало с ошибкой: {err}")
-            return
+    async def ensure_nats_connected(self):
+        if self.nats_cli is None or self.nats_cli.is_closed:
+            try:
+                self.nats_cli = await nats.connect(
+                    servers=[self.nats_url],
+                    connect_timeout=5,
+                    max_reconnect_attempts=3
+                )
+                logger.info("Подключение к NATS успешно установлено")
+            except (ErrConnectionClosed, ErrNoServers,
+                    ErrTimeout, ConnectionClosedError,
+                    TimeoutError) as err:
+                logger.error(f"Ошибка подключения к NATS: {err}")
+                raise NatsError
 
+    async def runner(self):
+        await self.ensure_nats_connected()
         try:
             with self.reader as stream:
                 while True:
@@ -301,22 +307,29 @@ class ReaderManager:
 
                             json_message = json.dumps(message).encode('utf-8')
 
-                            await nc.publish(self.topic, json_message)
+                            await self.nats_cli.publish(self.topic, json_message)
                             logger.debug(f"Отправлен кадр {frame_number}: {message}")
 
                         except (ConnectionClosedError, TimeoutError) as e:
                             logger.error(f"Ошибка обработки кадра {frame_number}: {e}")
+                            raise NatsError
 
         except KeyboardInterrupt:
             logger.info("Процесс обработки остановлен пользователем")
         except Exception as e:
             logger.exception(f"Не предвиденная ошибка обработки события в VideoReader", {e})
+            await self.close()
         finally:
-            if nc and not nc.is_closed:
-                await nc.drain()
-                await nc.close()
-                nc = None
-                logger.info("NATS соединение закрыто")
+            await self.close()
+
+    async def close(self):
+        logger.info(f'Инициализирую остановку и освобождения сервисов')
+
+        if self.nats_cli and not self.nats_cli.is_closed:
+            await self.nats_cli.drain()
+            await self.nats_cli.close()
+            self.nats_cli = None
+            logger.info("NATS соединение закрыто")
 
     def process(self):
-        asyncio.run(self.main())
+        asyncio.run(self.runner())

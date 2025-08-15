@@ -47,27 +47,23 @@ class RouterManager(AbstractRouterManager):
         """Выбор всех доступных моделей по умолчанию"""
         return self.available_models
 
-    async def process(self):
-        """
-            Основной цикл работы маршрутизатора.
-
-            Запускает:
-                Подписку на NATS
-                Фоновую задачу обновления моделей
-                Бесконечный цикл обработки событий
-        """
+    async def run_process(self):
+        """Основной цикл (уже внутри контекста)"""
         await self.subscribe()
-        asyncio.create_task(self._update_available_models())
+        await asyncio.create_task(self._update_available_models())
         logger.info("Сервис RoutingManager успешно запущен")
         # while True:
         #     await asyncio.sleep(1)
         await asyncio.Event().wait()
 
+    def process(self):
+        async def _run():
+            async with self:
+                await self.run_process()
+
+        asyncio.run(_run())
+
 
 if __name__ == '__main__':
-    async def main():
-        async with RouterManager() as router:
-            await router.process()
-
-
-    asyncio.run(main())
+    router = RouterManager()
+    router.process()
