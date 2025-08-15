@@ -10,6 +10,7 @@ from nats.errors import ConnectionClosedError, TimeoutError
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
 from abs_src.abs_reader import AbstractReader
 from src.s3_storage import SeaweedFSManager
+from src.singeleton.yaml_reader import YamlReader
 from utils.logger import logger
 from utils.decorators import measure_latency_sync
 
@@ -253,7 +254,9 @@ class ReaderManager:
         self.reader = VideoReaderFactory.create_reader(reader_type)
         self.uploader = SeaweedFSManager()
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
-        self.topic = os.getenv("topic_stream")
+
+        self.setup_config = YamlReader()
+        self.topic = self.setup_config.get('DataReader')['out_channel']
 
     async def main(self):
         nc = None

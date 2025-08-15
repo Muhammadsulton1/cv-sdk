@@ -11,6 +11,7 @@ from redis import RedisError
 from nats.aio.client import Client as NATS
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout, ErrBadSubscription
 
+from src.singeleton.yaml_reader import YamlReader
 from utils.decorators import measure_latency_async
 from utils.logger import logger
 
@@ -33,10 +34,13 @@ class AbstractRouterManager(ABC):
 
         self.nats_cli = None
         self.redis = None
-        self.topic_input = os.getenv('topic_stream')
         self.sub = None
         self.available_models = set()
         self.discovery_interval = 5
+
+        self.setup_config = YamlReader()
+        self.in_channel = self.setup_config.get('DataRouter')['in_channel']
+        self.out_channel = self.setup_config.get('DataRouter')['out_channel']
 
     async def __aenter__(self):
         """Асинхронный контекстный менеджер для подключения."""
@@ -146,10 +150,10 @@ class AbstractRouterManager(ABC):
 
         try:
             self.sub = await self.nats_cli.subscribe(
-                subject=f"{self.topic_input}",
+                subject=f"{self.in_channel}",
                 cb=self.message_handler
             )
-            logger.info(f"Подписался на топик NATS: {self.topic_input}")
+            logger.info(f"Подписался на топик NATS: {self.in_channel}")
         except ErrBadSubscription as err:
             logger.error("Не смог подписаться на заданный топик", str(err))
             raise
@@ -194,7 +198,7 @@ class AbstractRouterManager(ABC):
             return
 
         for model in selected_models:
-            output_topic = f"{model}"
+            output_topic = f"{model}_{self.out_channel}"
             message = self._prepare_message(data, model)
             await self.nats_cli.publish(output_topic, json.dumps(message).encode())
 

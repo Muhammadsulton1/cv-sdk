@@ -12,11 +12,11 @@ DataRouter:
 InferenceModel:
   type: inference
   description: "Сервис инференса"
-  in_channel: router
+  in_channel: inference
   out_channel: aggregator
 
 Aggregator:
   type: aggregator
   description: "Сервис для агрегации результатов инференса"
-  in_channel: inference
+  in_channel: aggregator
   out_channel: sender

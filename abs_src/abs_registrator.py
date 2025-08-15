@@ -13,6 +13,8 @@ from uuid import uuid4
 from collections import defaultdict, Counter
 from nats.aio.errors import ErrTimeout, ErrConnectionClosed, ErrNoServers, ErrBadSubscription
 from redis.asyncio import Redis
+
+from src.singeleton.yaml_reader import YamlReader
 from utils.logger import logger
 
 
@@ -30,6 +32,11 @@ class AbstractEventRegistrator(ABC):
         })
         self._nats_connected = False
         self._last_inference_data = None
+
+        self.setup_config = YamlReader()
+
+        self.in_channel = self.setup_config.get('Aggregator')['in_channel']
+        self.out_channel = self.setup_config.get('Aggregator')['out_channel']
 
     @abstractmethod
     def create_task(self, key_name: str) -> None:
@@ -82,7 +89,7 @@ class AbstractEventRegistrator(ABC):
                 servers=os.getenv("NATS_HOST", "nats://localhost:4222").split(","),
                 max_reconnect_attempts=5
             )
-            await self.nats_conn.subscribe('inference.results', cb=self.message_handler)
+            await self.nats_conn.subscribe(self.in_channel, cb=self.message_handler)
             self._nats_connected = True
             logger.info("Подписка на топик NATS 'inference.results' успешно установлена")
         except (ErrTimeout, ErrConnectionClosed, ErrNoServers, ErrBadSubscription) as err:
@@ -101,9 +108,10 @@ class AbstractEventRegistrator(ABC):
         try:
             if self.nats_conn and not self.nats_conn.is_closed:
                 await self.nats_conn.drain()
+                await self.nats_conn.close()
                 self.nats_conn = None
         except Exception as e:
-            logger.error(f"Error draining NATS connection: {e}")
+            logger.error(f"Ошибка закрытие соединения NATS: {e}")
         finally:
             if self.redis:
                 await self.redis.aclose()

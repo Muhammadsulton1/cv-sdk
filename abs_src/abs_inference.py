@@ -1,8 +1,6 @@
 import os
 import json
 import asyncio
-import aiohttp
-import io
 import numpy as np
 import nats
 
@@ -11,12 +9,12 @@ from typing import Any, Dict
 from polygraphy.backend.trt import CreateConfig, engine_from_network, NetworkFromOnnxPath, save_engine, \
     EngineFromBytes, Profile
 from polygraphy.backend.common import BytesFromPath
-from PIL import Image
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from src.data_scheme import InferenceOutputSchema
 from src.s3_storage import SeaweedFSManager
+from src.singeleton.yaml_reader import YamlReader
 from utils.decorators import measure_latency_async, measure_latency_sync
 from utils.logger import logger
 
@@ -150,7 +148,7 @@ class TensorRTConverter(AbstractConverter):
             max=(32, 3, 640, 640),
             opt=(1, 3, 640, 640)
         )
-        config = CreateConfig(profiles=[profile])
+        config = CreateConfig(profiles=[profile], fp16=True)
         self.engine = engine_from_network(model, config=config)
         save_engine(self.engine, path=self.converted_path)
 
@@ -179,6 +177,31 @@ class BaseInferenceModel(ABC):
         self.nats_conn = None
         self.redis = Redis(host=self.REDIS_HOST, port=self.REDIS_PORT)
         self.s3_client = SeaweedFSManager()
+
+        self.setup_config = YamlReader()
+        self.in_channel = self.setup_config.get('InferenceModel')['in_channel']
+        self.out_channel = self.setup_config.get('InferenceModel')['out_channel']
+
+        self._service_task = None
+
+    async def close(self) -> None:
+        logger.info(f'Инициализирована закрытие всех соединений для {self.model_name}')
+        if self.nats_conn:
+            await self.nats_conn.drain()
+            await self.nats_conn.close()
+            self.nats_conn = None
+
+        if self.redis:
+            await self.redis.aclose()
+            logger.info("Redis соединение закрыто")
+            self.redis = None
+
+        if self.s3_client:
+            await self.s3_client.__aexit__(None, None, None)
+            logger.info("S3 клиент закрыт")
+            self.s3_client = None
+
+        logger.info(f'Освобождены все сетевые ресурсы для класса {self.model_name}')
 
     @classmethod
     def get_name(cls) -> str:
@@ -279,9 +302,8 @@ class BaseInferenceModel(ABC):
             parsed_result = InferenceOutputSchema(**result)
 
             if parsed_result:
-                response_topic = "inference.results"
                 await self.nats_conn.publish(
-                    response_topic,
+                    self.out_channel,
                     json.dumps({
                         "model": self.model_name,
                         "result": result,
@@ -305,8 +327,8 @@ class BaseInferenceModel(ABC):
         """
         self.nats_conn = await nats.connect(self.NATS_HOST)
         await self.s3_client.__aenter__()
-        await self.nats_conn.subscribe(self.model_name, cb=self.message_handler)
-        logger.info(f"Подписка класса [{self.model_name}] на топик NATS: {self.model_name} успешно")
+        await self.nats_conn.subscribe(f'{self.model_name}_{self.in_channel}', cb=self.message_handler)
+        logger.info(f"Подписка класса [{self.model_name}_{self.in_channel}] на топик NATS: {self.model_name} успешно")
         await asyncio.create_task(self.register_service())
 
     @measure_latency_sync()
