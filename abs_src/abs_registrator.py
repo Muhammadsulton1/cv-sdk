@@ -199,6 +199,9 @@ class BasicEventRegistrator(AbstractEventRegistrator):
     def add_video_frame(self, key_name: str, frame: np.ndarray) -> None:
         self.video_writer.add_frame(key_name, frame)
 
+    # TODO СДЕЛАТЬ СКАЧИВАНИЕ КАДРА ПО ССЫЛКЕ И УСТАНОВИТЬ ОПЦИЮ НАДО ЛИ СОХРАНЯТЬ ВИДЕО ИЛИ НЕТ
+    # TODO ТАКЖЕ СДЕЛАТЬ СИНГЕЛЕТОН ДЛЯ ЕДИННОЙ ИНИЦИАЛИЗАЦИИ РЕДИСА. НАДО ПОДУМАТЬ НЕОБХОДИМО ЛИ ?
+
     async def register_task(self, key_name: str, message_event: dict) -> None:
         self.stop_task(key_name)
         if self.task_catalog[key_name]['task'] == 'DONE':
@@ -224,7 +227,7 @@ class EventRegistrator(BasicEventRegistrator):
         await self.connect_nats()
         try:
             while True:
-                self.process()
+                self.process(self.inference_data)
                 await asyncio.sleep(0.005)
         except KeyboardInterrupt:
             print("Остановлено пользователем")
@@ -232,5 +235,5 @@ class EventRegistrator(BasicEventRegistrator):
             await self.close()
 
     @abstractmethod
-    def process(self) -> None:
+    def process(self, inference_data) -> None:
         pass

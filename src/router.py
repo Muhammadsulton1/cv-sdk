@@ -46,7 +46,6 @@ class RouterManager(AbstractRouterManager):
         """Выбор всех доступных моделей по умолчанию"""
         return self.available_models
 
-
     async def process(self):
         """
             Основной цикл работы маршрутизатора.

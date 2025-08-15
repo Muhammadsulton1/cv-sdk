@@ -32,15 +32,3 @@ class AbstractReader(ABC):
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-
-
-class FileUploader(ABC):
-    @abstractmethod
-    async def upload_file(self, file_data: bytes) -> str:
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass

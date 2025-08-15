@@ -1,17 +1,17 @@
 import asyncio
 import json
 import os
-import uuid
-import aiohttp
+
 import av
 import cv2
 import nats
 
 from nats.errors import ConnectionClosedError, TimeoutError
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
-from abs_src.abs_reader import AbstractReader, FileUploader
+from abs_src.abs_reader import AbstractReader
+from src.s3_storage import SeaweedFSManager
 from utils.logger import logger
-from utils.decorators import measure_latency_sync, measure_latency_async
+from utils.decorators import measure_latency_sync
 
 
 class AVReader(AbstractReader):
@@ -198,64 +198,6 @@ class OpencvVideoReader(AbstractReader):
         }
 
 
-class SeaweedFSUploader(FileUploader):
-    def __init__(self):
-        self.master_url = os.getenv("master_url")
-        self.volume_url = os.getenv("volume_url")
-        self.bucket_name = os.getenv("bucket_name")
-        self.ttl = os.getenv("ttl_bucket")
-        self._session = None
-
-    async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        if self._session:
-            await self._session.close()
-
-    async def upload_file(self, file_data: bytes, max_retries: int = 3) -> str:
-        for attempt in range(max_retries):
-            try:
-                return await self.upload(file_data)
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                logger.error(f"Ошибка при загрузки кадра в SEAWEADFS: {e}")
-                logger.error(f"Попытка {attempt + 1} из {max_retries}")
-
-    @measure_latency_async()
-    async def upload(self, file_data: bytes) -> str:
-        try:
-            assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}"
-            async with self._session.get(assign_url) as resp:
-                assign_data = await resp.json()
-                fid = assign_data["fid"]
-
-            upload_url = f"{self.volume_url}/{self.bucket_name}/{fid}?ttl={self.ttl}"
-            file_name = f"{uuid.uuid4()}.jpg"
-
-            form_data = aiohttp.FormData()
-            form_data.add_field(
-                'file',
-                file_data,
-                filename=file_name,
-                content_type='image/jpeg'
-            )
-
-            async with self._session.post(upload_url, data=form_data) as resp:
-                resp.raise_for_status()
-
-            return f"{self.volume_url}/{self.bucket_name}/{fid}"
-        except (aiohttp.ClientError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as err:
-            logger.error(f"Ошибка подключения при загрузки кадра в SEAWEADFS: {err}")
-            raise err
-        except Exception as err:
-            logger.error(f"Ошибка при загрузки кадра в SEAWEADFS: {err}")
-            raise err
-
-
 class VideoReaderFactory:
     """Фабрика для создания объектов чтения видео."""
 
@@ -309,7 +251,7 @@ class ReaderManager:
             raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
 
         self.reader = VideoReaderFactory.create_reader(reader_type)
-        self.uploader = SeaweedFSUploader()
+        self.uploader = SeaweedFSManager()
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
         self.topic = os.getenv("topic_stream")
 
@@ -345,7 +287,7 @@ class ReaderManager:
 
                     async with self.uploader as publisher:
                         try:
-                            file_url = await publisher.upload_file(image_data)
+                            file_url = await publisher.upload_object(image_data)
 
                             message = {
                                 "frame_id": f"frame_{frame_number:06d}",

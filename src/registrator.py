@@ -5,7 +5,7 @@ from abs_src.abs_registrator import EventRegistrator
 
 class ExampleEventRegistrator(EventRegistrator):
 
-    def process(self) -> None:
+    def process(self, inference_data) -> None:
         print(self.inference_data)
 
 
