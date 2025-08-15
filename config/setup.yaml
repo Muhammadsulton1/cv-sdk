@@ -1,0 +1,22 @@
+DataReader:
+  type: reader
+  description: "Сервис для чтения видео потока"
+  out_channel: router
+
+DataRouter:
+  type: router
+  description: "Сервис для перенаправления кадров между сервисами инференса"
+  in_channel: router
+  out_channel: inference
+
+InferenceModel:
+  type: inference
+  description: "Сервис инференса"
+  in_channel: router
+  out_channel: aggregator
+
+Aggregator:
+  type: aggregator
+  description: "Сервис для агрегации результатов инференса"
+  in_channel: inference
+  out_channel: sender

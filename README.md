@@ -75,7 +75,7 @@ routing_ttl=10
 
 **Терминал 1 - Чтение видео:**
 ```bash
-python src/video_reader.py
+python src/data_reader.py
 ```
 
 **Терминал 2 - Маршрутизатор:**
