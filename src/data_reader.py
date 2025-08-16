@@ -1,8 +1,7 @@
 import asyncio
 import json
 import os
-import time
-import uuid
+from typing import Dict, Any
 
 import av
 import cv2
@@ -12,15 +11,19 @@ from nats.errors import ConnectionClosedError, TimeoutError
 from nats.aio.errors import ErrConnectionClosed, ErrNoServers, ErrTimeout
 
 from abs_src.abs_reader import AbstractReader
+from src.data_class import FrameData
 from src.s3_storage import SeaweedFSManager
 from src.singeleton.yaml_reader import YamlReader
 from utils.err import NatsError
 from utils.logger import logger
-from utils.decorators import measure_latency_sync, measure_latency_async, measure_detailed_time
+from utils.decorators import measure_latency_sync, measure_latency_async
 
 
 class AVReader(AbstractReader):
+    """Реализация чтения видео через библиотеку PyAV."""
+
     def __init__(self):
+        """Инициализирует контейнер, видеопоток и счетчик кадров."""
         super().__init__()
         self.container = None
         self.video_stream = None
@@ -28,13 +31,21 @@ class AVReader(AbstractReader):
         self._frames_processed = 0
 
     def __enter__(self):
+        """Поддержка контекстного менеджера (with)."""
         self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Обеспечивает закрытие ресурсов при выходе из контекста."""
         self.close()
 
     def open(self):
+        """
+            Открывает видео источник и инициализирует поток для чтения.
+
+            Raises:
+                RuntimeError: Если источник не удалось открыть.
+        """
         self.container = av.open(
             self.source,
             options={"rtsp_flags": "prefer_tcp"}
@@ -56,12 +67,17 @@ class AVReader(AbstractReader):
         self.frame_generator = self._generate_frames()
 
     def close(self):
+        """Закрывает контейнер с видео и освобождает ресурсы."""
         if self.container:
             self.container.close()
 
     @measure_latency_sync()
     def _generate_frames(self):
-        """Приватный генератор кадров"""
+        """Приватный генератор кадров.
+
+        Yields:
+            FrameData: Объект с данными кадра и метаинформацией.
+        """
         frame_count = 0
         for packet in self.container.demux(self.video_stream):
             for frame in packet.decode():
@@ -73,26 +89,36 @@ class AVReader(AbstractReader):
                 frame_time = float(frame.pts * frame.time_base)
 
                 rgb_frame = frame.to_ndarray(format="bgr24")
-                yield {
-                    'image': rgb_frame,
-                    'number': frame_number,
-                    'timestamp': frame_time
-                }
+
+                yield FrameData(image=rgb_frame,
+                                number=frame_number,
+                                timestamp=frame_time)
                 self._frames_processed += 1
 
     @measure_latency_sync()
-    def get_frame(self):
-        """Возвращает следующий кадр как изображение"""
+    def get_frame(self) -> FrameData | None:
+        """
+        Возвращает следующий кадр как изображение.
+
+        Returns:
+            FrameData | None: Данные кадра или None при завершении потока.
+        """
         try:
             return next(self.frame_generator)
         except StopIteration:
             return None
 
     def __iter__(self):
+        """Возвращает итератор для поддержки цикла for."""
         return self
 
     def __next__(self):
-        """Поддержка итерации"""
+        """
+        Возвращает следующий кадр через протокол итератора.
+
+        Raises:
+            StopIteration: Когда кадры закончились.
+        """
         frame = self.get_frame()
         if frame is None:
             raise StopIteration
@@ -105,6 +131,12 @@ class AVReader(AbstractReader):
 
     @property
     def info(self):
+        """
+        Возвращает метаинформацию о видео потоке.
+
+        Returns:
+            dict: Словарь с параметрами видео.
+        """
         return {
             "source": self.source,
             "codec": self.codec_name,
@@ -117,7 +149,10 @@ class AVReader(AbstractReader):
 
 
 class OpencvVideoReader(AbstractReader):
+    """Реализация чтения видео через OpenCV."""
+
     def __init__(self):
+        """Инициализирует параметры видео и счетчик кадров."""
         super().__init__()
         self.codec_name = "unknown"
         self.width = 0
@@ -126,13 +161,21 @@ class OpencvVideoReader(AbstractReader):
         self.frames_processed = 0
 
     def __enter__(self):
+        """Поддержка контекстного менеджера (with)."""
         self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Обеспечивает закрытие ресурсов при выходе из контекста."""
         self.close()
 
     def open(self):
+        """
+            Открывает видео источник через OpenCV.
+
+            Raises:
+                RuntimeError: Если источник не удалось открыть.
+        """
         self.video_stream = cv2.VideoCapture(self.source)
         if not self.video_stream.isOpened():
             raise RuntimeError(f"Ошибка открытия источника: {self.source}")
@@ -152,13 +195,17 @@ class OpencvVideoReader(AbstractReader):
         self.frames_processed = 0
 
     def close(self):
+        """Освобождает ресурсы видеозахвата."""
         if self.video_stream is not None and self.video_stream.isOpened():
             self.video_stream.release()
         self.video_stream = None
 
-    # @measure_latency_sync()
-    def get_frame(self):
-        """Возвращает следующий кадр с учетом skip_frames."""
+    def get_frame(self) -> FrameData | None:
+        """Возвращает следующий кадр с учетом skip_frames.
+
+        Returns:
+            FrameData | None: Данные кадра или None при завершении потока.
+        """
         for _ in range(self.skip_frames):
             if not self.video_stream.grab():
                 return None
@@ -174,17 +221,20 @@ class OpencvVideoReader(AbstractReader):
         frame_time = self.video_stream.get(cv2.CAP_PROP_POS_MSEC) / 1000.0  # Переводим в секунд
         self.frames_processed += 1
 
-        return {
-            'image': frame,
-            'number': frame_number,
-            'timestamp': frame_time
-        }
+        return FrameData(image=frame,
+                         number=frame_number,
+                         timestamp=frame_time)
 
     def __iter__(self):
+        """Возвращает итератор для поддержки цикла for."""
         return self
 
     def __next__(self):
-        """Поддержка итерации."""
+        """Возвращает следующий кадр через протокол итератора.
+
+        Raises:
+            StopIteration: Когда кадры закончились.
+        """
         frame = self.get_frame()
         if frame is None:
             raise StopIteration
@@ -192,6 +242,12 @@ class OpencvVideoReader(AbstractReader):
 
     @property
     def info(self):
+        """
+        Возвращает метаинформацию о видео потоке.
+
+        Returns:
+            dict: Словарь с параметрами видео.
+        """
         return {
             "source": self.source,
             "codec": self.codec_name,
@@ -204,7 +260,7 @@ class OpencvVideoReader(AbstractReader):
 
 
 class VideoReaderFactory:
-    """Фабрика для создания объектов чтения видео."""
+    """"Фабрика для создания объектов чтения видео."""
 
     _readers = {
         "opencv": OpencvVideoReader,
@@ -216,9 +272,14 @@ class VideoReaderFactory:
         """
         Создает экземпляр видео ридера указанного типа.
 
-        :param reader_type: Тип ридера ('opencv' или 'av')
-        :return: Экземпляр класса ридера
-        :raises ValueError: Если указан неподдерживаемый тип ридера
+        Args:
+            reader_type: Тип ридера ('opencv' или 'av')
+
+        Returns:
+            AbstractReader: Экземпляр класса ридера
+
+        Raises:
+            ValueError: Если указан неподдерживаемый тип ридера
         """
         reader_class = cls._readers.get(reader_type.lower())
 
@@ -236,8 +297,12 @@ class VideoReaderFactory:
         """
         Регистрирует новый тип ридера в фабрике.
 
-        :param reader_type: Идентификатор типа ридера
-        :param reader_class: Класс ридера (должен быть вызываемым)
+        Args:
+            reader_type: Идентификатор типа ридера
+            reader_class: Класс ридера (должен быть вызываемым)
+
+        Raises:
+            TypeError: Если переданный класс не вызываемый
         """
         if not callable(reader_class):
             raise TypeError("VideoReader class должен быть вызываемым объектом")
@@ -245,18 +310,21 @@ class VideoReaderFactory:
 
     @classmethod
     def supported_readers(cls):
-        """Возвращает список поддерживаемых типов ридеров."""
+        """"Возвращает список поддерживаемых типов ридеров."""
         return list(cls._readers.keys())
 
 
 class ReaderManager:
+    """Управляет процессом чтения видео, обработкой кадров и публикацией результатов."""
     def __init__(self):
+        """Инициализирует компоненты системы."""
         reader_type = os.environ.get("reader_type", "opencv")
         if reader_type is None:
             raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
 
         self.reader = VideoReaderFactory.create_reader(reader_type)
-        self.uploader = SeaweedFSManager()
+        # self.uploader = SeaweedFSManager()
+        self.uploader = None
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
 
         self.setup_config = YamlReader()
@@ -264,7 +332,25 @@ class ReaderManager:
 
         self.nats_cli = None
 
+    async def __aenter__(self):
+        """Инициализация всех ресурсов при старте"""
+        self.uploader = await SeaweedFSManager().__aenter__()
+        await self.ensure_nats_connected()
+        return self
+
+    async def __aexit__(self, *args):
+        """Единая точка очистки"""
+        if self.uploader:
+            await self.uploader.__aexit__(*args)
+        await self.close()  # Закрытие NATS
+
     async def ensure_nats_connected(self):
+        """
+        Устанавливает подключение к серверу NATS при необходимости.
+
+       Raises:
+           NatsError: При неудачном подключении.
+       """
         if self.nats_cli is None or self.nats_cli.is_closed:
             try:
                 self.nats_cli = await nats.connect(
@@ -279,56 +365,102 @@ class ReaderManager:
                 logger.error(f"Ошибка подключения к NATS: {err}")
                 raise NatsError
 
-    async def runner(self):
-        await self.ensure_nats_connected()
+    @measure_latency_async()
+    async def process_frame(self, frame_data: FrameData) -> Dict[str, Any]:
+        """
+        Обрабатывает кадр: загружает в SeaweedFS и формирует сообщение.
+
+        Args:
+            frame_data: Данные обрабатываемого кадра
+
+        Returns:
+            dict: Сообщение для публикации в NATS
+
+        Raises:
+            Exception: При ошибках обработки кадра
+        """
+        try:
+            # async with self.uploader as uploader:
+            upload_result = await self.uploader.upload_object(frame_data.image)
+            # upload_result = await uploader.upload_object(frame_data.image)
+
+            message = {
+                "frame_id": f"frame_{frame_data.number:06d}",
+                "seaweed_url": upload_result.file_url,
+                "file_id": upload_result.file_id,
+                "timestamp": frame_data.timestamp,
+                "size": upload_result.size,
+                "meta": {
+                    "width": frame_data.image.shape[1],
+                    "height": frame_data.image.shape[0],
+                    "channels": frame_data.image.shape[2]
+                }
+            }
+
+            return message
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки кадра {frame_data.number}: {e}")
+            raise
+
+    async def publish_to_nats(self, message: Dict[str, Any]) -> None:
+        """Публикует сообщение в NATS с измерением времени.
+
+        Args:
+            message: Данные для публикации в формате JSON
+        """
+        try:
+            json_message = json.dumps(message, ensure_ascii=False).encode('utf-8')
+            await self.nats_cli.publish(self.topic, json_message)
+        except Exception as e:
+            logger.error(f"Ошибка публикации в NATS: {e}")
+            raise
+
+    async def runner(self) -> None:
+        """Основной цикл обработки видео"""
+        # await self.ensure_nats_connected()
+
         try:
             with self.reader as stream:
                 while True:
-                    frame_data = stream.get_frame()
-                    meta_info = stream.info
-                    if frame_data is None:
-                        logger.info("Конец видео стрима")
-                        break
+                    try:
+                        frame_data = stream.get_frame()
+                        if frame_data is None:
+                            logger.info("Конец видеопоток")
+                            break
 
-                    frame = frame_data['image']
-                    frame_number = frame_data['number']
-                    frame_timestamp = frame_data['timestamp']
+                        message = await asyncio.create_task(self.process_frame(frame_data))
 
-                    async with self.uploader as publisher:
-                        try:
-                            file_url = await asyncio.create_task(publisher.upload_object(frame))
+                        await self.publish_to_nats(message)
+                        logger.debug(f"Обработан кадр {frame_data.number}")
 
-                            message = {
-                                "frame_id": f"frame_{frame_number:06d}",
-                                "seaweed_url": file_url,
-                                "timestamp": frame_timestamp,
-                                "meta": meta_info
-                            }
-                        except (ConnectionClosedError, TimeoutError) as e:
-                            logger.error(f"Ошибка обработки кадра {frame_number}: {e}")
-                            raise NatsError
-
-                    json_message = json.dumps(message).encode('utf-8')
-
-                    await self.nats_cli.publish(self.topic, json_message)
-                    logger.debug(f"Отправлен кадр {frame_number}: {message}")
+                    except Exception as e:
+                        logger.error(f"Ошибка в цикле обработки: {e}", exc_info=True)
+                        continue
 
         except KeyboardInterrupt:
-            logger.info("Процесс обработки остановлен пользователем")
+            logger.info("Остановка по запросу пользователя")
         except Exception as e:
-            logger.exception(f"Не предвиденная ошибка обработки события в VideoReader", {e})
-            await self.close()
+            logger.exception(f"Критическая ошибка в runner: {e}")
         finally:
             await self.close()
 
-    async def close(self):
-        logger.info(f'Инициализирую остановку и освобождения сервисов')
+    async def close(self) -> None:
+        """Корректно закрывает все ресурсы системы."""
+        logger.info("Закрытие ReaderManager")
 
         if self.nats_cli and not self.nats_cli.is_closed:
-            await self.nats_cli.drain()
-            await self.nats_cli.close()
-            self.nats_cli = None
-            logger.info("NATS соединение закрыто")
+            try:
+                await self.nats_cli.drain()
+                await self.nats_cli.close()
+                logger.info("NATS соединение закрыто")
+            except Exception as e:
+                logger.error(f"Ошибка закрытия NATS: {e}")
 
     def process(self):
-        asyncio.run(self.runner())
+        async def _run():
+            async with self:
+                await self.runner()
+
+        asyncio.run(_run())
+        # asyncio.run(self.runner())

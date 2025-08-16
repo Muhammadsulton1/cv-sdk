@@ -20,3 +20,11 @@ class S3BucketError(S3Error):
 
 class NatsError(Exception):
     pass
+
+
+class FrameError(Exception):
+    pass
+
+
+class FrameDecodeError(FrameError):
+    pass

@@ -2,7 +2,7 @@ version: '3.7'
 services:
   master:
     image: chrislusf/seaweedfs:3.93
-    command: "master -ip=master -mdir=/data -peers=master:9333"
+    command: "master -ip=master -mdir=/data -peers=master:9333 "
     ports:
       - "9333:9333"  # Web UI + API
       - "19333:19333" # gRPC
@@ -22,14 +22,14 @@ services:
       - "8080:8080"  # API
       - "18080:8081" # Web UI
     environment:
-      - TTL=10m
+      - writers=256
     networks:
       - seaweed-net
 
   # Filer сервер (HTTP API + S3)
   filer:
     image: chrislusf/seaweedfs:3.93
-    command: "filer -master=master:9333"
+    command: "filer -master=master:9333 -volume=volume1:8888"
     depends_on:
       - master
     ports:
