@@ -40,6 +40,30 @@ def measure_latency_sync():
     return decorator
 
 
+def measure_detailed_time(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        start_cpu = time.process_time()
+
+        result = await func(*args, **kwargs)
+
+        end_time = time.perf_counter()
+        end_cpu = time.process_time()
+
+        wall_time = (end_time - start_time) * 1000
+        cpu_time = (end_cpu - start_cpu) * 1000
+
+        print(f"📊 {func.__name__} детальная статистика:")
+        print(f"   ├─ Общее время (wall clock): {wall_time:.2f} мс")
+        print(f"   ├─ CPU время: {cpu_time:.2f} мс")
+        print(f"   └─ I/O время: {wall_time - cpu_time:.2f} мс")
+
+        return result
+
+    return wrapper
+
+
 def retry(retries=3, delay=1):
     """
     Декоратор для повторной попытки выполнения функции в случае неудачи.

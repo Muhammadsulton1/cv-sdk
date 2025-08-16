@@ -1,6 +1,9 @@
 import asyncio
 import json
 import os
+import time
+import uuid
+
 import av
 import cv2
 import nats
@@ -13,7 +16,7 @@ from src.s3_storage import SeaweedFSManager
 from src.singeleton.yaml_reader import YamlReader
 from utils.err import NatsError
 from utils.logger import logger
-from utils.decorators import measure_latency_sync
+from utils.decorators import measure_latency_sync, measure_latency_async, measure_detailed_time
 
 
 class AVReader(AbstractReader):
@@ -153,7 +156,7 @@ class OpencvVideoReader(AbstractReader):
             self.video_stream.release()
         self.video_stream = None
 
-    @measure_latency_sync()
+    # @measure_latency_sync()
     def get_frame(self):
         """Возвращает следующий кадр с учетом skip_frames."""
         for _ in range(self.skip_frames):
@@ -291,12 +294,9 @@ class ReaderManager:
                     frame_number = frame_data['number']
                     frame_timestamp = frame_data['timestamp']
 
-                    _, buffer = cv2.imencode('.jpg', frame)
-                    image_data = buffer.tobytes()
-
                     async with self.uploader as publisher:
                         try:
-                            file_url = await publisher.upload_object(image_data)
+                            file_url = await asyncio.create_task(publisher.upload_object(frame))
 
                             message = {
                                 "frame_id": f"frame_{frame_number:06d}",
@@ -304,15 +304,14 @@ class ReaderManager:
                                 "timestamp": frame_timestamp,
                                 "meta": meta_info
                             }
-
-                            json_message = json.dumps(message).encode('utf-8')
-
-                            await self.nats_cli.publish(self.topic, json_message)
-                            logger.debug(f"Отправлен кадр {frame_number}: {message}")
-
                         except (ConnectionClosedError, TimeoutError) as e:
                             logger.error(f"Ошибка обработки кадра {frame_number}: {e}")
                             raise NatsError
+
+                    json_message = json.dumps(message).encode('utf-8')
+
+                    await self.nats_cli.publish(self.topic, json_message)
+                    logger.debug(f"Отправлен кадр {frame_number}: {message}")
 
         except KeyboardInterrupt:
             logger.info("Процесс обработки остановлен пользователем")

@@ -3,9 +3,11 @@ import os
 import uuid
 import asyncio
 import aiohttp
+import cv2
+import numpy as np
 
 from PIL import Image
-from utils.decorators import measure_latency_async
+from utils.decorators import measure_latency_async, retry
 from utils.err import S3UploadError, S3DownloadError
 from utils.logger import logger
 
@@ -29,33 +31,29 @@ class SeaweedFSManager:
         if self._session:
             await self._session.close()
 
-    @measure_latency_async()
-    async def upload_object(self, file_data: bytes, max_retries: int = 3) -> str:
-        for attempt in range(max_retries):
-            try:
-                return await self._upload(file_data)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                if attempt == max_retries - 1:
-                    logger.error(f"Ошибка загрузки данных. Инициализирую попытки: {max_retries}: {err}")
-                    raise S3UploadError from err
-                delay = min(2 ** attempt, 5)
-                await asyncio.sleep(delay)
-                logger.warning(
-                    f"Загрузка кадра в S3 попытка {attempt + 1}/{max_retries} неуспешно. Повторная попытка через {delay}сек...")
-
-    async def _upload(self, file_data: bytes) -> str:
-        """Быстрая загрузка файла с оптимизированными запросами"""
+    @retry(retries=3)
+    async def upload_object(self, frame: np.ndarray) -> str:
         try:
-            assign_url = f"{self.master_url}/dir/assign?ttl={self.ttl}&collection={self.bucket_name}"
+            return await self._upload(frame)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            logger.error(f"Ошибка загрузки данных в S3")
+            raise S3UploadError from err
+
+    async def _upload(self, frame: np.ndarray) -> str:
+        try:
+            assign_url = f"http://{self.master_url}:9333/dir/assign?ttl={self.ttl}&collection={self.bucket_name}"
             async with self._session.get(assign_url, raise_for_status=True) as resp:
                 assign_data = await resp.json()
                 fid = assign_data["fid"]
 
-            upload_url = f"{self.volume_url}/{self.bucket_name}/{fid}?ttl={self.ttl}"
+            upload_url = f"http://{self.volume_url}:8888/{self.bucket_name}/{fid}?ttl={self.ttl}"
+
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+
             form_data = aiohttp.FormData()
             form_data.add_field(
                 'file',
-                file_data,
+                buf.tobytes(),
                 filename=f"{uuid.uuid4()}.jpg",
                 content_type='image/jpeg'
             )
@@ -76,7 +74,7 @@ class SeaweedFSManager:
             logger.error(f"Ошибка загрузки данных в S3: {type(err).__name__} - {str(err)}")
             raise err
 
-    @measure_latency_async()
+    @retry(retries=3)
     async def download_object(self, object_url: str):
         """Оптимизированное скачивание файла с кешированием соединения"""
         try:

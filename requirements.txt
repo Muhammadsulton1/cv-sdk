@@ -10,3 +10,4 @@ polygraphy==0.49.9
 onnxruntime
 tensorrt==8.6.*
 concurrent-log-handler
+aioboto3
