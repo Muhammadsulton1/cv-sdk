@@ -52,6 +52,7 @@ class SeaweedFSManager:
                 s3_data = await fs.upload_object(frame)
                 image = await fs.download_object(s3_data.file_url)
     """
+
     def __init__(self) -> None:
         """
         Инициализация менеджера SeaweedFS.
@@ -163,23 +164,18 @@ class SeaweedFSManager:
                 logger.error(f"Ошибка декодирования кадра в байты для загрузки в S3")
                 raise FrameDecodeError
 
-            form_data = aiohttp.FormData()
-            form_data.add_field(
-                'file',
-                buf.tobytes(),
-                filename=f"{uuid.uuid4()}.jpg",
-                content_type='image/jpeg'
-            )
+            image_bytes = buf.tobytes()
 
-            async with self._session.post(
+            async with self._session.put(
                     upload_url,
-                    data=form_data,
+                    data=image_bytes,
+                    headers={"Content-Type": "image/jpeg"},
                     raise_for_status=True
             ) as resp:
                 pass
 
             return S3Data(
-                file_url=f"{self.volume_url}/{self.bucket_name}/{fid}",
+                file_url=f"http://{self.volume_url}:8888/{self.bucket_name}/{fid}",
                 file_id=fid,
                 size=len(buf.tobytes())
             )
