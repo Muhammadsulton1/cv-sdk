@@ -225,7 +225,7 @@ class AbstractRouterManager(ABC):
         Используется внутри асинхронного контекста__aenter__/__aexit__.
         """
         await self.subscribe()
-        await asyncio.create_task(self._update_available_models())
+        asyncio.create_task(self._update_available_models())
         logger.info("Сервис RoutingManager успешно запущен")
         await asyncio.Event().wait()
 
