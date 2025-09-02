@@ -1,8 +1,7 @@
-import asyncio
 import time
+from typing import Dict, Any
 
 from abs_src.abs_router import AbstractRouterManager
-from utils.logger import logger
 
 
 class RouterManager(AbstractRouterManager):
@@ -33,35 +32,18 @@ class RouterManager(AbstractRouterManager):
         """Получение моделей из Redis"""
         return await self.redis.smembers(self.service_key)
 
-    def _prepare_message(self, data: dict, model: str) -> dict:
+    def _prepare_message(self, data: Dict[str, Any], model: str) -> Dict[str, Any]:
         """Формирование сообщения для модели"""
         return {
             "frame_id": data["frame_id"],
             "seaweed_url": data["seaweed_url"],
             "model": model,
             "timestamp": time.time()
-            # "cached_key": f"frame_meta:{data['frame_id']}"
         }
 
-    def _select_models(self, data: dict) -> set:
+    def _select_models(self, data: Dict[str, Any]) -> set:
         """Выбор всех доступных моделей по умолчанию"""
         return self.available_models
-
-    async def run_process(self):
-        """Основной цикл (уже внутри контекста)"""
-        await self.subscribe()
-        await asyncio.create_task(self._update_available_models())
-        logger.info("Сервис RoutingManager успешно запущен")
-        # while True:
-        #     await asyncio.sleep(1)
-        await asyncio.Event().wait()
-
-    def process(self):
-        async def _run():
-            async with self:
-                await self.run_process()
-
-        asyncio.run(_run())
 
 
 if __name__ == '__main__':

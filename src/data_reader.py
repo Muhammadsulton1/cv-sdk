@@ -67,12 +67,6 @@ class ReaderManager(AbstractReaderManager):
 
         self.reader = VideoReaderFactory.create_reader(self.reader_type)
 
-    @measure_latency_async()
-    async def upload_frames(self, frames):
-        message = await self.uploader.upload_object(frames)
-
-        return message
-
     async def runner(self):
         try:
             with self.reader as stream:
@@ -83,14 +77,7 @@ class ReaderManager(AbstractReaderManager):
                             logger.info("Конец видеопоток")
                             break
 
-                        message = await self.upload_frames(frames)
-
-                        #frames = await self.uploader.upload_object(message.file_url)
-
-                        cv2.imshow('frames', frames.frames[0])
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
-
+                        message = await self.s3.upload_object(frames)
                         await self.publish_to_nats(message)
 
                     except Exception as e:

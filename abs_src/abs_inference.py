@@ -14,10 +14,13 @@ from redis.asyncio import Redis
 
 from src.data_scheme import InferenceOutputSchema
 from src.s3_storage import SeaweedFSManager
+from src.singeleton.connection_singeleton import RedisClient
 from src.singeleton.yaml_reader import YamlReader
 from utils.decorators import measure_latency_async, measure_latency_sync
 from utils.logger import logger
 
+
+# TODO: Поправить получения кадра от инференса и его правильное скачивание, а также добавить соединенение с NATS И РЕДИС ЧЕРЕЗ Сингелетон
 
 class AbstractConverter(ABC):
     """
@@ -179,8 +182,8 @@ class BaseInferenceModel(ABC):
         self.s3_client = SeaweedFSManager()
 
         self.setup_config = YamlReader()
-        self.in_channel = self.setup_config.get('InferenceModel')['in_channel']
-        self.out_channel = self.setup_config.get('InferenceModel')['out_channel']
+        self.in_channel = self.setup_config.get(os.getenv('SERVICE_NAME')).get('in_channel')
+        self.out_channel = self.setup_config.get(os.getenv('SERVICE_NAME')).get('out_channel')
 
         self._service_task = None
 
@@ -221,8 +224,8 @@ class BaseInferenceModel(ABC):
         """
         while True:
             try:
-                await self.redis.sadd("routing_to_models", self.model_name)
-                await self.redis.expire("routing_to_models", self.REGISTER_TTL)
+                await self.redis.sadd("models_routing", self.model_name)
+                await self.redis.expire("models_routing", self.REGISTER_TTL)
                 await asyncio.sleep(self.REGISTER_TTL)
             except Exception as e:
                 logger.info(f'Ошибка регистрации сервиса: {e}', )
@@ -290,11 +293,11 @@ class BaseInferenceModel(ABC):
             data = json.loads(msg.data.decode())
 
             if not isinstance(data, dict):
-                raise ValueError(f"Invalid message format: expected JSON object, got {type(data).__name__}")
+                raise ValueError(f"Не валидный формат сообщений: ожидался JSON объект, был передан {type(data).__name__}")
 
             if not data.get('seaweed_url'):
-                logger.error(f"Missing 'seaweed_url' in message")
-                raise ValueError("Missing 'seaweed_url' in message")
+                logger.error(f"Отсутствует ссылка на кадр в seaweed_url")
+                raise ValueError("Отсутствует ссылка на кадр в seaweed_url")
 
             image = await self.s3_client.download_object(data['seaweed_url'])
             result = self.run_inference(image)

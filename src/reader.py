@@ -1,8 +1,6 @@
 import cv2
 import av
-import numpy as np
 
-from typing import List
 from abs_src.abs_reader import AbstractFrameReader
 from src.data_scheme import FrameData
 from utils.decorators import reconnect_stream
@@ -10,7 +8,31 @@ from utils.err import StreamError, StreamDecodeError
 
 
 class AVStreamReader(AbstractFrameReader):
+    """
+        Ридер видеопотока через PyAV (FFmpeg).
+
+        Открывает и читает видео из источников RTSP и файловых, возвращая пакеты кадров.
+        Поддерживает пропуск кадров между батчами и внутри батча.
+        Автоматически восстанавливает соединение при ошибках чтения.
+    """
     def __init__(self):
+        """
+        Инициализация AVStreamReader.
+
+        Атрибуты от AbstractFrameReader:
+            source (str): URL или путь к видео.
+            batch_size (int): Количество кадров в одном пакете.
+            skip_frames (int): Количество кадров для пропуска между кадрами.
+            frames_skip_batch (int): Количество кадров для пропуска между пакетами.
+            stream_name (str): Идентификатор потока.
+            info (Dict): Метаданные о потоке (ширина, высота, fps).
+            frames_processed (int): Счётчик обработанных кадров.
+
+        Собственные атрибуты:
+            frame_iterator: Итератор кадров контейнера PyAV.
+            need_skip_batch (bool): Флаг необходимости пропуска пакетов.
+            frame_count (int): Общее число прочитанных кадров.
+        """
         super().__init__()
         self.frame_iterator = None
         self.need_skip_batch = self.frames_skip_batch > 0
@@ -18,6 +40,19 @@ class AVStreamReader(AbstractFrameReader):
 
     @reconnect_stream(retry=5)
     def open(self) -> None:
+        """
+        Открывает контейнер PyAV и инициализирует параметры потока.
+
+        Логика:
+            - Проверка валидности batch_size.
+            - Открытие RTSP с опцией prefer_tcp или файла.
+            - Поиск видеопотока.
+            - Чтение параметров width, height, framerate.
+            - Инициализация frame_iterator.
+        Исключения:
+            ValueError   — если batch_size < 1.
+            StreamError  — при проблемах открытия или поиска потока.
+        """
         if self.batch_size < 1:
             raise ValueError("Длина батча не может быть меньше 1")
 
@@ -39,11 +74,27 @@ class AVStreamReader(AbstractFrameReader):
         self.frame_iterator = self.container.decode(video=0)
 
     def close(self) -> None:
+        """
+        Закрывает контейнер PyAV при завершении работы.
+        """
         if self.container is not None:
             self.container.close()
 
     @reconnect_stream(retry=5)
     def get_frame(self):
+        """
+        Считывает один пакет кадров из потока.
+
+        Логика:
+            - При необходимости пропускает frames_skip_batch кадров перед пакетом.
+            - Читает до batch_size кадров, пропуская skip_frames между ними.
+            - Обновляет счётчики frames_processed и frame_count.
+            - После пакета отмечает необходимость пропуска следующего батча.
+        Возвращает:
+            FrameData: cam_source, список np.ndarray кадров или None, meta.
+        Исключения:
+            StreamError — при невозможности получить или пропустить кадр.
+        """
         if self.need_skip_batch and self.frames_skip_batch > 0:
             skipped = 0
             while skipped < self.frames_skip_batch:
@@ -83,8 +134,6 @@ class AVStreamReader(AbstractFrameReader):
         if self.frames_skip_batch > 0:
             self.need_skip_batch = True
 
-        # return current_batch if current_batch else None
-
         if current_batch:
             return FrameData(cam_source=self.stream_name, frames=current_batch, meta=self.info)
         else:
@@ -92,8 +141,26 @@ class AVStreamReader(AbstractFrameReader):
 
 
 class OpenCVStreamReader(AbstractFrameReader):
+    """
+        Ридер видеопотока через OpenCV VideoCapture.
+
+        Поддерживает аналогичный интерфейс AbstractFrameReader:
+            open(), get_frame(), close().
+        Восстанавливает соединение при ошибках.
+    """
     @reconnect_stream(retry=5)
     def open(self) -> None:
+        """
+        Открывает VideoCapture и инициализирует параметры потока.
+
+        Логика:
+            - Проверка валидности batch_size.
+            - Открытие источника cv2.VideoCapture.
+            - Чтение width, height, fps.
+        Исключения:
+            ValueError       — если batch_size < 1.
+            StreamError      — при неудачном открытии.
+        """
         if self.batch_size < 1:
             raise ValueError("Длина батча не может быть меньше 1")
 
@@ -106,10 +173,26 @@ class OpenCVStreamReader(AbstractFrameReader):
         self.framerate = self.stream.get(cv2.CAP_PROP_FPS)
 
     def close(self) -> None:
+        """
+        Освобождает ресурс VideoCapture.
+        """
         if self.stream is not None:
             self.stream.release()
 
     def get_frame(self) -> FrameData:
+        """
+        Считывает один пакет кадров из VideoCapture.
+
+        Логика:
+            - При необходимости пропускает frames_skip_batch кадров перед пакетом.
+            - Читает до batch_size кадров, пропуская skip_frames между ними.
+            - Обновляет счётчик frames_processed.
+        Возвращает:
+            FrameData: cam_source, список np.ndarray кадров или None, meta.
+        Исключения:
+            StreamDecodeError — при невозможности получить кадр.
+            StreamError       — при ошибках пропуска.
+        """
         if self.need_skip_batch and self.frames_skip_batch > 0:
             for _ in range(self.frames_skip_batch):
                 ret = self.stream.grab()
@@ -142,8 +225,6 @@ class OpenCVStreamReader(AbstractFrameReader):
             return FrameData(cam_source=self.stream_name, frames=current_batch, meta=self.info)
         else:
             return FrameData(cam_source=self.stream_name, frames=None, meta=self.info)
-
-        #return current_batch if current_batch else None
 
 
 if __name__ == "__main__":

@@ -76,11 +76,11 @@ class RedisClient:
 
 
 class S3Client:
-    __instance = None
+    __instance: aiohttp.ClientSession = None
 
     @classmethod
-    async def connect(cls):
-        if cls.__instance is None:
+    async def connect(cls) -> aiohttp.ClientSession:
+        if cls.__instance is None or cls.__instance.closed:
             connector = aiohttp.TCPConnector(
                 limit_per_host=100,
                 limit=200,
@@ -89,15 +89,13 @@ class S3Client:
                 force_close=True,
                 enable_cleanup_closed=True
             )
-
-            cls.__instance = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30, connect=10),
-                connector=connector,
-            )
-
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            cls.__instance = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            logger.info("S3Client session created")
         return cls.__instance
 
     @classmethod
     async def close(cls):
         if cls.__instance and not cls.__instance.closed:
             await cls.__instance.close()
+            logger.info("S3Client session closed")

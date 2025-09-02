@@ -22,7 +22,7 @@ class AbstractReaderManager(ABC):
         if self.reader_type is None:
             raise ValueError("Пропущен аргумент 'reader_type' для выбора типа чтения кадров")
 
-        self.uploader = None
+        self.s3 = None
         self.nats_url = os.getenv("nats_host", "nats://localhost:4222")
 
         self.setup_config = YamlReader()
@@ -32,14 +32,14 @@ class AbstractReaderManager(ABC):
 
     async def __aenter__(self):
         """Инициализация всех ресурсов при старте"""
-        self.uploader = await SeaweedFSManager().__aenter__()
+        self.s3 = await SeaweedFSManager().__aenter__()
         self.nats_cli = await NatsClient.connect()
         return self
 
     async def __aexit__(self, *args):
         """Единая точка очистки"""
-        if self.uploader:
-            await self.uploader.__aexit__(*args)
+        if self.s3:
+            await self.s3.__aexit__(*args)
 
         await NatsClient.close()
 
@@ -55,14 +55,6 @@ class AbstractReaderManager(ABC):
         except Exception as e:
             logger.error(f"Ошибка публикации в NATS: {e}")
             raise
-
-    # @abstractmethod
-    # def process_frames(self, frames):
-    #     pass
-
-    @abstractmethod
-    async def upload_frames(self, send_type, frames) -> S3Data:
-        pass
 
     @abstractmethod
     async def runner(self) -> None:

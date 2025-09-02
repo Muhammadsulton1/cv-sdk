@@ -22,49 +22,50 @@ import concurrent.futures
 import io
 import os
 import asyncio
-from typing import List
+from typing import List, Union
 
-import aiohttp
 import cv2
 import numpy as np
-
-from PIL import Image
 
 from src.data_scheme import FrameData, S3Data
 from src.singeleton.connection_singeleton import S3Client
 from utils.decorators import retry_async, measure_latency_async
-from utils.err import S3UploadError, S3DownloadError, FrameDecodeError, ArchiveDecodeError
+from utils.err import S3UploadError, S3DownloadError, S3FrameDecodeError, S3GetError
 from utils.logger import logger
 
 
 class SeaweedFSManager:
     """
-        Асинхронный менеджер для взаимодействия с SeaweedFS.
+        Менеджер для работы с распределённой файловой системой SeaweedFS.
 
-        Класс управляет загрузкой и скачиванием изображений, обеспечивая:
-        - Автоматическое получение FID через мастер-ноду
-        - Оптимизированное кодирование изображений
-        - Управление соединениями через aiohttp
-        - Повторные попытки при временных ошибках
-
-        Пример использования:
-            async with SeaweedFSManager() as fs:
-                s3_data = await fs.upload_object(frame)
-                image = await fs.download_object(s3_data.file_url)
-    """
+        Обеспечивает асинхронную загрузку и скачивание изображений через HTTP.
+        Реализует:
+            - Автоматическое получение FID от master-ноды SeaweedFS.
+            - Оптимизированное кодирование изображений в JPEG с качеством 85%.
+            - Параллельное сжатие пакетов кадров.
+            - Управление HTTP-сессией через контекстный менеджер.
+            - Повторные попытки операций при сетевых ошибках.
+            - Измерение задержек операций через декоратор measure_latency_async.
+        Зависимости (переменные окружения):
+            master_url — хост мастер-ноды (без порта);
+            bucket_name — имя коллекции (аналог S3 bucket);
+            volume_url — хост volume-сервера;
+            ttl_bucket — время жизни объекта (формат "Xm", по умолчанию "5m").
+        """
 
     def __init__(self) -> None:
         """
-        Инициализация менеджера SeaweedFS.
+            Инициализация менеджера.
 
-        Загружает параметры подключения из переменных окружения.
-
-        Атрибуты:
-            master_url (str): Хост мастер-ноды SeaweedFS (без протокола и порта)
-            bucket_name (str): Имя коллекции (аналог бакета S3)
-            volume_url (str): Хост volume-сервера
-            ttl (str): Время жизни объекта (формат '5m' для 5 минут)
-            _session (aiohttp.ClientSession): Асинхронная сессия (инициализируется при входе в контекст)
+            Загружает настройки из переменных окружения и создаёт пул потоков
+            для операций кодирования и декодирования изображений.
+            Атрибуты:
+                master_url (str): адрес master-ноды SeaweedFS.
+                bucket_name (str): имя коллекции для хранения объектов.
+                volume_url (str): адрес volume-сервера для операций PUT/GET.
+                ttl (str): время жизни загружаемых объектов.
+                _session: HTTP-сессия aiohttp (инициализируется в __aenter__).
+                _executor: ThreadPoolExecutor для выполнения CPU-bound задач.
         """
         self.master_url = os.getenv("master_url")
         self.bucket_name = os.getenv("bucket_name")
@@ -75,37 +76,34 @@ class SeaweedFSManager:
 
     async def __aenter__(self):
         """
-        Инициализация асинхронного контекстного менеджера.
+            Вход в асинхронный контекстный менеджер.
 
-        Создает клиентскую сессию aiohttp с оптимизированными параметрами:
-        - limit_per_host=100: ограничение соединений на один хост
-        - ttl_dns_cache=300: кэширование DNS на 300 секунд
-        - keepalive_timeout=30: таймаут keep-alive соединений
-        - Таймауты запросов: total=30 сек, connect=10 сек
-
-        Возвращает:
-            SeaweedFSManager: Экземпляр менеджера с активной сессией
+            Устанавливает соединение с SeaweedFS через S3Client
+            (aiohttp.ClientSession с оптимизированными параметрами).
+            Возвращает:
+                SeaweedFSManager: экземпляр менеджера с открытой сессией.
         """
         self._session = await S3Client.connect()
-
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """
-        Очистка ресурсов при выходе из контекста.
+            Выход из асинхронного контекста менеджера.
 
-       Корректно закрывает HTTP-сессию, если она была создана.
-
-       Аргументы:
-           exc_type: Тип исключения (если возникло)
-           exc_val: Значение исключения
-           exc_tb: Объект трейсбэка
-       """
+            Закрывает HTTP-сессию и завершает пул потоков.
+        """
         await S3Client.close()
 
         self._executor.shutdown()
 
     async def _compress_frame(self, frame: np.ndarray) -> bytes:
+        """
+        Сжимает один кадр в JPEG в отдельном потоке.
+        Параметры:
+            frame (np.ndarray): изображение в формате BGR.
+        Возвращает:
+            bytes: байтовое представление JPEG-изображения.
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -113,12 +111,29 @@ class SeaweedFSManager:
         )
 
     async def _compress_frames_parallel(self, frames: List[np.ndarray]) -> bytes:
+        """
+       Параллельно сжимает список кадров и объединяет результаты.
+       Каждый кадр оборачивается префиксом длины (4 байта big-endian).
+       Параметры:
+           frames (List[np.ndarray]): список кадров для сжатия.
+       Возвращает:
+           bytes: объединённые байты всех JPEG-кадров с метками длины.
+       """
         tasks = [self._compress_frame(frame) for frame in frames]
         compressed_frames = await asyncio.gather(*tasks)
 
         return b''.join([len(f).to_bytes(4, 'big') + f for f in compressed_frames])
 
     async def _assign_fid(self) -> str:
+        """
+        Запрашивает у master-ноды свободный FID для загрузки.
+        Формирует GET-запрос:
+            http://{master_url}:9333/dir/assign?ttl={ttl}&collection={bucket_name}&replication=000
+        Возвращает:
+            str: полученный FID.
+        Исключения:
+            S3GetError: если FID не возвращён в ответе.
+        """
         assign_url = f"http://{self.master_url}:9333/dir/assign"
         params = {'ttl': self.ttl, 'collection': self.bucket_name, 'replication': '000'}
 
@@ -126,10 +141,29 @@ class SeaweedFSManager:
             assign_data = await resp.json()
             if fid := assign_data.get("fid"):
                 return fid
-        raise S3UploadError("Не получен FID от master")
+        raise S3GetError("Не получен FID от master")
 
     @retry_async(retries=3)
     async def upload_object(self, frames_batch: FrameData):
+        """
+        Загружает один или несколько кадров в SeaweedFS.
+
+        Параметры:
+            frames_batch (FrameData): структура с полями:
+                cam_source (str)  — идентификатор источника;
+                frames (List[np.ndarray] | List[bytes]) — кадры или байты.
+        Логика:
+            - Если один кадр: сжатие в JPEG или передача байтов.
+            - Если несколько: вызов _compress_frames_parallel.
+            - Запрос FID, формирование URL PUT-запроса.
+            - Отправка данных на volume-сервер.
+        Возвращает:
+            S3Data: информация об объекте (URL, FID, content_type).
+        Исключения:
+            ValueError     — если нет кадров для загрузки.
+            S3UploadError  — при ошибке получения FID.
+            HTTPError      — при ошибке PUT-запроса.
+        """
         source_name = frames_batch.cam_source
 
         if not frames_batch.frames:
@@ -170,3 +204,75 @@ class SeaweedFSManager:
             file_id=fid,
             content_type=content_type
         )
+
+    @measure_latency_async()
+    async def download_object(self, message: S3Data):
+        """
+        Скачивает и декодирует изображение(я) из SeaweedFS.
+
+        Параметры:
+            message (S3Data): объект с полями:
+                file_url     — полный URL ресурса;
+                content_type — тип содержимого.
+        Логика:
+            - GET-запрос к message.file_url.
+            - Чтение всего контента.
+            - Вызов _decode_content для преобразования байт в np.ndarray.
+        Возвращает:
+            np.ndarray при одиночном JPEG или List[np.ndarray] для пакетов.
+        Исключения:
+            S3DownloadError — при ошибке HTTP-запроса.
+        """
+        try:
+            async with self._session.get(message.file_url, raise_for_status=True) as response:
+                content = await response.read()
+            return await self._decode_content(content, message.content_type)
+        except S3DownloadError:
+            raise S3DownloadError
+
+    @measure_latency_async()
+    async def _decode_content(self, content: bytes, content_type: str) -> Union[np.ndarray, List[np.ndarray]]:
+        """
+            Декодирует бинарные данные в изображение(я) используя ThreadPool.
+
+            Параметры:
+                content (bytes): поток байт из HTTP-ответа.
+                content_type (str): "image/jpeg" или "application/octet-stream".
+            Логика:
+                - Для JPEG: однокадровый cv2.imdecode.
+                - Для бинарного пакета: чтение длины (4 байта) + кадр + cv2.imdecode.
+            Возвращает:
+                np.ndarray или List[np.ndarray] в зависимости от content_type.
+            Исключения:
+                S3FrameDecodeError — при ошибке декодирования кадра.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+
+            if content_type == "image/jpeg":
+                return await loop.run_in_executor(
+                    self._executor,
+                    lambda: cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
+                )
+
+            elif content_type == "application/octet-stream":
+                frames = []
+                offset = 0
+
+                while offset < len(content):
+                    length = int.from_bytes(content[offset:offset + 4], 'big')
+                    offset += 4
+
+                    frame_data = content[offset:offset + length]
+                    offset += length
+
+                    frame = await loop.run_in_executor(
+                        self._executor,
+                        lambda: cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    )
+                    frames.append(frame)
+
+                return frames
+
+        except S3FrameDecodeError:
+            raise S3FrameDecodeError

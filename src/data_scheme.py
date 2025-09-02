@@ -60,7 +60,7 @@ class InferenceOutputSchema(BaseModel):
         return pred_dict
 
 
-@dataclass
+@dataclass(slots=True)
 class FrameData:
     """Структура данных кадра"""
     cam_source: str
@@ -68,7 +68,7 @@ class FrameData:
     meta: Optional[Dict[str, Any]] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class S3Data:
     """Результат загрузки"""
     file_url: str

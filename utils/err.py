@@ -6,6 +6,10 @@ class S3DownloadError(S3Error):
     pass
 
 
+class S3FrameDecodeError(S3Error):
+    pass
+
+
 class S3UploadError(S3Error):
     pass
 
@@ -14,27 +18,14 @@ class S3ConnectionError(S3Error):
     pass
 
 
+class S3GetError(S3Error):
+    pass
+
 class S3BucketError(S3Error):
     pass
 
 
 class NatsError(Exception):
-    pass
-
-
-class FrameError(Exception):
-    pass
-
-
-class FrameDecodeError(FrameError):
-    pass
-
-
-class ArchiveError(Exception):
-    pass
-
-
-class ArchiveDecodeError(ArchiveError):
     pass
 
 
