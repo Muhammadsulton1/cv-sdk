@@ -2,6 +2,7 @@ import asyncio
 import time
 import functools
 
+from utils.err import StreamError
 from utils.logger import logger
 
 
@@ -40,31 +41,32 @@ def measure_latency_sync():
     return decorator
 
 
-def measure_detailed_time(func):
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        start_cpu = time.process_time()
-
-        result = await func(*args, **kwargs)
-
-        end_time = time.perf_counter()
-        end_cpu = time.process_time()
-
-        wall_time = (end_time - start_time) * 1000
-        cpu_time = (end_cpu - start_cpu) * 1000
-
-        print(f"📊 {func.__name__} детальная статистика:")
-        print(f"   ├─ Общее время (wall clock): {wall_time:.2f} мс")
-        print(f"   ├─ CPU время: {cpu_time:.2f} мс")
-        print(f"   └─ I/O время: {wall_time - cpu_time:.2f} мс")
-
-        return result
-
-    return wrapper
 
 
-def retry(retries=3, delay=1):
+def reconnect_stream(retry=5):
+    base_delay = 1
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(retry):
+                try:
+                    return func(*args, **kwargs)
+                except StreamError as e:
+                    if attempt < retry - 1:
+                        delay = base_delay * (2 ** attempt)
+                        print(f'Повторная попытка через: {delay} секунд')
+                        time.sleep(delay)
+                    else:
+                        raise RuntimeError(f"Функция '{func.__name__}' не удалась после {retry} попыток.") from e
+            return None
+
+        return wrapper
+
+    return decorator
+
+
+def retry_async(retries=3, delay=1):
     """
     Декоратор для повторной попытки выполнения функции в случае неудачи.
     :param retries: количество попыток (по умолчанию 3)

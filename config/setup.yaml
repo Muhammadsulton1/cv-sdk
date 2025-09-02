@@ -2,6 +2,21 @@ DataReader:
   type: reader
   description: "Сервис для чтения видео потока"
   out_channel: router
+  settings:
+    batch_size: 1
+    skip_frames: 0 # пропускает кадры между сборами батча
+    frames_skip_batch: 0 # пропускает кадры после сбора батча
+    source: ../../video/test_maneken.mp4
+    #source: ../video/test_maneken.mp4
+
+DataReader2:
+  type: reader
+  description: "Сервис для чтения видео потока"
+  out_channel: router
+  settings:
+    batch_size: 12
+    skip_frames: 0
+    source: ../../video/test_maneken.mp4
 
 DataRouter:
   type: router

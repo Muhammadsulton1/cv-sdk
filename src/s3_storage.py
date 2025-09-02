@@ -18,12 +18,11 @@
 - Автоматическое кодирование изображений в формат JPEG с качеством 85%
 - Встроенная обработка ошибок с логированием через централизованный logger
 """
-
+import concurrent.futures
 import io
 import os
-import time
-import uuid
 import asyncio
+from typing import List
 
 import aiohttp
 import cv2
@@ -31,9 +30,10 @@ import numpy as np
 
 from PIL import Image
 
-from src.data_class import S3Data
-from utils.decorators import retry
-from utils.err import S3UploadError, S3DownloadError, FrameDecodeError
+from src.data_scheme import FrameData, S3Data
+from src.singeleton.connection_singeleton import S3Client
+from utils.decorators import retry_async, measure_latency_async
+from utils.err import S3UploadError, S3DownloadError, FrameDecodeError, ArchiveDecodeError
 from utils.logger import logger
 
 
@@ -71,6 +71,7 @@ class SeaweedFSManager:
         self.volume_url = os.getenv("volume_url")
         self.ttl = os.getenv("ttl_bucket", "5m")
         self._session = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
     async def __aenter__(self):
         """
@@ -85,19 +86,7 @@ class SeaweedFSManager:
         Возвращает:
             SeaweedFSManager: Экземпляр менеджера с активной сессией
         """
-        connector = aiohttp.TCPConnector(
-            limit_per_host=100,
-            limit=200,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            force_close=True,
-            enable_cleanup_closed=True
-        )
-
-        self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30, connect=10),
-            connector=connector,
-        )
+        self._session = await S3Client.connect()
 
         return self
 
@@ -112,106 +101,72 @@ class SeaweedFSManager:
            exc_val: Значение исключения
            exc_tb: Объект трейсбэка
        """
-        if self._session and not self._session.closed:
-            await self._session.close()
+        await S3Client.close()
 
-    @retry(retries=3)
-    async def upload_object(self, frame: np.ndarray) -> S3Data:
-        """
-        Загрузка изображения в SeaweedFS.
+        self._executor.shutdown()
 
-        Выполняет следующие операции:
-        1. Получает уникальный FID от мастер-ноды
-        2. Кодирует кадр в JPEG (качество 85%)
-        3. Загружает данные на volume-сервер
-        4. Формирует метаданные успешной загрузки
+    async def _compress_frame(self, frame: np.ndarray) -> bytes:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            lambda: cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+        )
 
-        Аргументы:
-            frame (np.ndarray): Изображение в формате массива OpenCV (BGR)
+    async def _compress_frames_parallel(self, frames: List[np.ndarray]) -> bytes:
+        tasks = [self._compress_frame(frame) for frame in frames]
+        compressed_frames = await asyncio.gather(*tasks)
 
-        Возвращает:
-            S3Data: Объект с метаданными загруженного файла, содержащий:
-                - file_url: Публичный URL файла
-                - file_id: Уникальный идентификатор файла (FID)
-                - size: Размер файла в байтах
+        return b''.join([len(f).to_bytes(4, 'big') + f for f in compressed_frames])
 
-        Исключения:
-            S3UploadError: При отсутствии FID или других критических ошибках
-            FrameDecodeError: При неудачном кодировании изображения
-            aiohttp.ClientError: При сетевых проблемах (автоматические повторы)
-            asyncio.TimeoutError: При превышении таймаута соединения
-        """
-        try:
-            assign_url = f"http://{self.master_url}:9333/dir/assign"
-            params = {
-                'ttl': self.ttl,
-                'collection': self.bucket_name,
-                'replication': '000'
-            }
+    async def _assign_fid(self) -> str:
+        assign_url = f"http://{self.master_url}:9333/dir/assign"
+        params = {'ttl': self.ttl, 'collection': self.bucket_name, 'replication': '000'}
 
-            async with self._session.get(assign_url, params=params, raise_for_status=True) as resp:
-                assign_data = await resp.json()
-                fid = assign_data.get("fid")
-                if not fid:
-                    raise S3UploadError("Не получен FID от master")
+        async with self._session.get(assign_url, params=params, raise_for_status=True) as resp:
+            assign_data = await resp.json()
+            if fid := assign_data.get("fid"):
+                return fid
+        raise S3UploadError("Не получен FID от master")
 
-            upload_url = f"http://{self.volume_url}:8888/{self.bucket_name}/{fid}?ttl={self.ttl}"
+    @retry_async(retries=3)
+    async def upload_object(self, frames_batch: FrameData):
+        source_name = frames_batch.cam_source
 
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85]
+        if not frames_batch.frames:
+            raise ValueError("No frames to upload")
 
-            success, buf = cv2.imencode(".jpg", frame, encode_params)
-            if not success:
-                logger.error(f"Ошибка декодирования кадра в байты для загрузки в S3")
-                raise FrameDecodeError
+        if len(frames_batch.frames) == 1:
+            frame = frames_batch.frames[0]
+            if isinstance(frame, np.ndarray):
+                loop = asyncio.get_event_loop()
+                frame_bytes = await loop.run_in_executor(
+                    self._executor,
+                    lambda: cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+                )
+            else:
+                frame_bytes = frame
+            content_type = "image/jpeg"
+            upload_file = io.BytesIO(frame_bytes)
+        else:
+            compressed_data = await self._compress_frames_parallel(frames_batch.frames)
+            content_type = "application/octet-stream"
+            upload_file = io.BytesIO(compressed_data)
 
-            image_bytes = buf.tobytes()
+        upload_file.seek(0)
 
-            async with self._session.put(
-                    upload_url,
-                    data=image_bytes,
-                    headers={"Content-Type": "image/jpeg"},
-                    raise_for_status=True
-            ) as resp:
-                pass
+        fid = await self._assign_fid()
+        upload_url = f"http://{self.volume_url}:8888/{self.bucket_name}/{source_name}/{fid}?ttl={self.ttl}"
 
-            return S3Data(
-                file_url=f"http://{self.volume_url}:8888/{self.bucket_name}/{fid}",
-                file_id=fid,
-                size=len(buf.tobytes())
-            )
+        async with self._session.put(
+                upload_url,
+                data=upload_file,
+                headers={"Content-Type": content_type},
+                raise_for_status=True
+        ) as resp:
+            pass
 
-        except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as err:
-            logger.error(f"Сетевая ошибка при загрузки данных в S3: {type(err).__name__} - {str(err)}")
-            raise err
-        except S3UploadError as err:
-            logger.error(f"Ошибка загрузки данных в S3: {type(err).__name__} - {str(err)}")
-            raise err
-
-    @retry(retries=3)
-    async def download_object(self, object_url: str):
-        """
-        Скачивание изображения из SeaweedFS.
-
-        Аргументы:
-            object_url (str): Полный URL объекта (полученный через upload_object.file_url)
-
-        Возвращает:
-            PIL.Image.Image: Загруженное изображение в объекте PIL
-
-        Исключения:
-            S3DownloadError: При критических ошибках обработки изображения
-            aiohttp.ClientError: При сетевых проблемах (автоматические повторы)
-            asyncio.TimeoutError: При превышении таймаута соединения
-            OSError: При ошибках обработки изображения PIL
-        """
-        try:
-            async with self._session.get(object_url, raise_for_status=True) as response:
-                image_data = await response.read()
-                return Image.open(io.BytesIO(image_data))
-
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
-            logger.error(f"Сетевая ошибка при скачивании данных из S3: {type(err).__name__} - {str(err)}")
-            raise err
-        except S3DownloadError as err:
-            logger.error(f"Ошибка скачивания данных из S3: {type(err).__name__} - {str(err)}")
-            raise err
+        return S3Data(
+            file_url=upload_url,
+            file_id=fid,
+            content_type=content_type
+        )

@@ -1,4 +1,7 @@
-from typing import List, Dict, Union, Optional
+from dataclasses import dataclass
+from typing import List, Dict, Union, Optional, Any
+
+import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -39,9 +42,6 @@ class InferenceDataSchema(BaseModel):
         if len(mask_list) >= 4:
             raise ValueError("маска должна содержать минимум 5 элементов")
 
-        # for mask in mask_list:
-        #     if len(mask) < 2:
-        #         raise ValueError("Каждая маска должна содержать минимум 5 элементов")
         return mask_list
 
 
@@ -60,35 +60,17 @@ class InferenceOutputSchema(BaseModel):
         return pred_dict
 
 
-if __name__ == '__main__':
+@dataclass
+class FrameData:
+    """Структура данных кадра"""
+    cam_source: str
+    frames: Optional[List[np.ndarray]] = None
+    meta: Optional[Dict[str, Any]] = None
 
-    valid_data = {
-        "predictions": {
-            0: {
-                "boxes": [[10, 20, 30, 40], [50, 60, 70, 80]],
-                "score": [0.9, 0.8],
-                "mask": [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
-            },
-            "car": {
-                "boxes": [[15, 25, 35, 45]],
-                "score": [0.95]
-            }
-        }
-    }
 
-    invalid_data = {
-        "predictions": {
-            True: {
-                "boxes": [[1, 2, 3, 4], [1, 2, 3, 4], [1, 1, 1, 1], [1, 1, 1, 1], [2, 2, 2, 2]],
-                "score": [0.1, 0.1, 0.1, 0.1, 0.1],
-                "mask": [[1], [1, 2], [13, 1, 1, 1], [12], [13]]
-            }
-        }
-    }
-
-    parsed = InferenceOutputSchema.model_validate(invalid_data)
-
-    if parsed:
-        print(parsed.predictions.keys())
-    else:
-        print('not')
+@dataclass
+class S3Data:
+    """Результат загрузки"""
+    file_url: str
+    file_id: str
+    content_type: str | Dict[str, str]

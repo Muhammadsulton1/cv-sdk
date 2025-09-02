@@ -28,3 +28,23 @@ class FrameError(Exception):
 
 class FrameDecodeError(FrameError):
     pass
+
+
+class ArchiveError(Exception):
+    pass
+
+
+class ArchiveDecodeError(ArchiveError):
+    pass
+
+
+class StreamError(Exception):
+    pass
+
+
+class StreamDecodeError(StreamError):
+    pass
+
+
+class StreamFinishedError(StreamError):
+    pass
