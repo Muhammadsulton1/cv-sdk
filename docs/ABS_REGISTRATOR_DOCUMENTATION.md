@@ -30,7 +30,7 @@ def __init__(self):
         port=int(os.getenv('REDIS_PORT', 6379)),
         decode_responses=False
     )
-    self.nats_conn = None
+    self.nats_cli = None
     self.task_catalog = defaultdict(lambda: {
         'task': '',
         'status': [],

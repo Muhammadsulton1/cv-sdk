@@ -22,7 +22,7 @@ import concurrent.futures
 import io
 import os
 import asyncio
-from typing import List, Union
+from typing import List, Union, Dict, Any
 
 import cv2
 import numpy as np
@@ -206,7 +206,7 @@ class SeaweedFSManager:
         )
 
     @measure_latency_async()
-    async def download_object(self, message: S3Data):
+    async def download_object(self, message: Dict[str, Any]):
         """
         Скачивает и декодирует изображение(я) из SeaweedFS.
 
@@ -224,9 +224,9 @@ class SeaweedFSManager:
             S3DownloadError — при ошибке HTTP-запроса.
         """
         try:
-            async with self._session.get(message.file_url, raise_for_status=True) as response:
+            async with self._session.get(message['file_url'], raise_for_status=True) as response:
                 content = await response.read()
-            return await self._decode_content(content, message.content_type)
+            return await self._decode_content(content, message['content_type'])
         except S3DownloadError:
             raise S3DownloadError
 

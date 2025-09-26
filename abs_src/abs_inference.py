@@ -1,8 +1,9 @@
 import os
 import json
 import asyncio
+import threading
+
 import numpy as np
-import nats
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict
@@ -10,11 +11,10 @@ from polygraphy.backend.trt import CreateConfig, engine_from_network, NetworkFro
     EngineFromBytes, Profile
 from polygraphy.backend.common import BytesFromPath
 from pydantic import ValidationError
-from redis.asyncio import Redis
 
 from src.data_scheme import InferenceOutputSchema
 from src.s3_storage import SeaweedFSManager
-from src.singeleton.connection_singeleton import RedisClient
+from src.singeleton.connection_singeleton import RedisClient, NatsClient, S3Client
 from src.singeleton.yaml_reader import YamlReader
 from utils.decorators import measure_latency_async, measure_latency_sync
 from utils.logger import logger
@@ -159,17 +159,7 @@ class TensorRTConverter(AbstractConverter):
 class BaseInferenceModel(ABC):
     """
         Базовый класс для моделей инференса с поддержкой NATS и Redis.
-
-        Атрибуты:
-            NATS_HOST: Адреса NATS-серверов
-            REDIS_HOST: Хост Redis
-            REDIS_PORT: Порт Redis
-            ROUTING_TTL: TTL регистрации в Redis (сек)
-            model_name: Имя модели (автоматически из класса)
     """
-    NATS_HOST = os.getenv("nats_host", "nats://localhost:4222").split(",")
-    REDIS_HOST = os.getenv('redis_host', 'localhost')
-    REDIS_PORT = int(os.getenv('redis_port', 6379))
     REGISTER_TTL = int(os.getenv('routing_ttl', 10))
 
     def __init__(self) -> None:
@@ -177,34 +167,16 @@ class BaseInferenceModel(ABC):
         Инициализация базовой модели.
         """
         self.model_name = self.get_name()
-        self.nats_conn = None
-        self.redis = Redis(host=self.REDIS_HOST, port=self.REDIS_PORT)
-        self.s3_client = SeaweedFSManager()
+
+        self.s3_cli = None
+        self.nats_cli = None
+        self.redis_cli = None
 
         self.setup_config = YamlReader()
         self.in_channel = self.setup_config.get(os.getenv('SERVICE_NAME')).get('in_channel')
         self.out_channel = self.setup_config.get(os.getenv('SERVICE_NAME')).get('out_channel')
 
         self._service_task = None
-
-    async def close(self) -> None:
-        logger.info(f'Инициализирована закрытие всех соединений для {self.model_name}')
-        if self.nats_conn and not self.nats_conn.is_closed:
-            await self.nats_conn.drain()
-            await self.nats_conn.close()
-            self.nats_conn = None
-
-        if self.redis:
-            await self.redis.aclose()
-            logger.info("Redis соединение закрыто")
-            self.redis = None
-
-        if self.s3_client:
-            await self.s3_client.__aexit__(None, None, None)
-            logger.info("S3 клиент закрыт")
-            self.s3_client = None
-
-        logger.info(f'Освобождены все сетевые ресурсы для класса {self.model_name}')
 
     @classmethod
     def get_name(cls) -> str:
@@ -224,15 +196,15 @@ class BaseInferenceModel(ABC):
         """
         while True:
             try:
-                await self.redis.sadd("models_routing", self.model_name)
-                await self.redis.expire("models_routing", self.REGISTER_TTL)
+                await self.redis_cli.sadd("models_routing", self.model_name)
+                await self.redis_cli.expire("models_routing", self.REGISTER_TTL)
                 await asyncio.sleep(self.REGISTER_TTL)
             except Exception as e:
                 logger.info(f'Ошибка регистрации сервиса: {e}', )
                 await asyncio.sleep(1)
 
     @abstractmethod
-    def preprocess(self, image: Any, *args, **kwargs) -> Any:
+    async def preprocess(self, image: Any, *args, **kwargs) -> Any:
         """
             Абстрактный метод пред обработки входных данных.
 
@@ -293,24 +265,24 @@ class BaseInferenceModel(ABC):
             data = json.loads(msg.data.decode())
 
             if not isinstance(data, dict):
-                raise ValueError(f"Не валидный формат сообщений: ожидался JSON объект, был передан {type(data).__name__}")
+                raise ValueError(
+                    f"Не валидный формат сообщений: ожидался JSON объект, был передан {type(data).__name__}")
 
-            if not data.get('seaweed_url'):
-                logger.error(f"Отсутствует ссылка на кадр в seaweed_url")
-                raise ValueError("Отсутствует ссылка на кадр в seaweed_url")
+            if not data.get('file_url'):
+                logger.error(f"Отсутствует ссылка на кадр в file_url")
+                raise ValueError("Отсутствует ссылка на кадр в file_url")
 
-            image = await self.s3_client.download_object(data['seaweed_url'])
-            result = self.run_inference(image)
+            image = await self.s3_cli.download_object(data)
+            result = await self.get_inference_results(image)
 
             parsed_result = InferenceOutputSchema(**result)
 
             if parsed_result:
-                await self.nats_conn.publish(
+                await self.nats_cli.publish(
                     self.out_channel,
                     json.dumps({
                         "model": self.model_name,
                         "result": result,
-                        "frame_id": data.get('frame_id', 'unknown'),
                         "frame_url": data.get('seaweed_url')
                     }).encode()
                 )
@@ -323,22 +295,20 @@ class BaseInferenceModel(ABC):
         except Exception as e:
             logger.error(f"Processing error [{self.model_name}]: {str(e)}")
 
-    async def connect_nats(self):
-        """
-        Подключается к NATS и подписывается на топик с именем модели.
-        Запускает фоновую задачу регистрации в Redis.
-        """
-        self.nats_conn = await nats.connect(self.NATS_HOST)
-        await self.s3_client.__aenter__()
-        await self.nats_conn.subscribe(f'{self.model_name}_{self.in_channel}', cb=self.message_handler)
+    async def process(self) -> None:
+        self.s3_cli = await SeaweedFSManager().__aenter__()
+        self.nats_cli = await NatsClient().connect()
+        self.redis_cli = await RedisClient().connect()
+
+        await self.nats_cli.subscribe(f'{self.model_name}_{self.in_channel}', cb=self.message_handler)
         logger.info(f"Подписка класса [{self.model_name}_{self.in_channel}] на топик NATS: {self.model_name} успешно")
         await asyncio.create_task(self.register_service())
 
-    @measure_latency_sync()
-    def run_inference(self, image: Any) -> Dict[str, Any]:
+    @measure_latency_async()
+    async def get_inference_results(self, image: np.ndarray) -> Dict[str, Any]:
         """
             Полный пайплайн обработки изображения:
-            1. Пред обработка
+            1. Пред обработка (в отдельном потоке)
             2. Инференс
             3. Постобработка
 
@@ -348,6 +318,8 @@ class BaseInferenceModel(ABC):
             Returns:
                 Результаты обработки
         """
-        preprocessed = self.preprocess(image)
-        inference_result = self.inference(preprocessed)
+        preprocessed_data = await asyncio.to_thread(self.preprocess, image)
+
+        image_processed = await preprocessed_data
+        inference_result = self.inference(image_processed)
         return self.postprocess(inference_result)

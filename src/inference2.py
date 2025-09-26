@@ -12,7 +12,7 @@ class YOLOModelNew(BaseInferenceModel):
         super().__init__()
         self.model = YOLO(model_path)
 
-    def preprocess(self, image, **kwargs) -> np.ndarray:
+    async def preprocess(self, image, **kwargs) -> np.ndarray:
         return image
 
     def inference(self, image: np.ndarray) -> Any:
@@ -45,7 +45,7 @@ class YOLOModelNew(BaseInferenceModel):
 
 async def main():
     model = YOLOModelNew(model_path='../weights/yolo11n.pt')
-    await model.connect_nats()
+    await model.process()
 
 
 if __name__ == "__main__":

@@ -10,8 +10,6 @@ from utils.decorators import retry_async
 from utils.logger import logger
 
 
-# TODO: Поправить получения кадра от ридера и его дальнеяшая публикация в инференсы
-
 class AbstractRouterManager(ABC):
     """
         Абстрактный базовый класс для роутинга сообщений между NATS и моделями обработки.
@@ -225,7 +223,7 @@ class AbstractRouterManager(ABC):
         Используется внутри асинхронного контекста__aenter__/__aexit__.
         """
         await self.subscribe()
-        asyncio.create_task(self._update_available_models())
+        await asyncio.create_task(self._update_available_models())
         logger.info("Сервис RoutingManager успешно запущен")
         await asyncio.Event().wait()
 

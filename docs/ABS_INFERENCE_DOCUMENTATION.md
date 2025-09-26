@@ -110,6 +110,7 @@ from polygraphy.backend.trt import TrtRunner
 import numpy as np
 from PIL import Image
 
+
 class YOLOModelTRT(TensorRTConverter, BaseInferenceModel):
     def __init__(self, model_path: str, converted_path: str, input_name: str, output_name: str):
         super().__init__(model_path, converted_path, input_name, output_name)
@@ -173,6 +174,7 @@ class YOLOModelTRT(TensorRTConverter, BaseInferenceModel):
             "class_ids": class_ids[keep_indices].tolist()
         }
 
+
 # Использование
 trt_model = YOLOModelTRT(
     model_path="yolov8n.onnx",
@@ -182,7 +184,7 @@ trt_model = YOLOModelTRT(
 )
 
 image = Image.open("test1.jpg")
-result = trt_model.run_inference(image)
+result = trt_model.get_inference_results(image)
 print(result)
 ```
 

@@ -35,8 +35,8 @@ class RouterManager(AbstractRouterManager):
     def _prepare_message(self, data: Dict[str, Any], model: str) -> Dict[str, Any]:
         """Формирование сообщения для модели"""
         return {
-            "frame_id": data["frame_id"],
-            "seaweed_url": data["seaweed_url"],
+            "file_url": data["file_url"],
+            "content_type": data["content_type"],
             "model": model,
             "timestamp": time.time()
         }

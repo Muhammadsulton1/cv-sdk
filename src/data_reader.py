@@ -1,6 +1,7 @@
+import asyncio
+
 import cv2
 from abs_src.abs_managers import AbstractReaderManager
-from abs_src.abs_reader import AbstractReader
 from src.reader import OpenCVStreamReader, AVStreamReader
 from utils.logger import logger
 from utils.decorators import measure_latency_async
@@ -70,14 +71,18 @@ class ReaderManager(AbstractReaderManager):
     async def runner(self):
         try:
             with self.reader as stream:
+                loop = asyncio.get_event_loop()
+
                 while True:
                     try:
-                        frames = stream.get_frame()
+                        frames = await loop.run_in_executor(None, stream.get_frame)
                         if frames is None:
                             logger.info("Конец видеопоток")
                             break
 
-                        message = await self.s3.upload_object(frames)
+                        message = await self.s3_cli.upload_object(frames)
+                        print(message)
+
                         await self.publish_to_nats(message)
 
                     except Exception as e:
