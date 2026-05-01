@@ -1,9 +1,11 @@
-.mp4
-.png
-.jpg
-.avi
+*.mp4
+*.png
+*.jpg
+*.avi
 volume1_data
 logs
-.log
+*.log
 weights
 volume2_data
+*.pyc
+*.xml

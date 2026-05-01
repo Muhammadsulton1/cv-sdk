@@ -1,0 +1,95 @@
+import asyncio
+import time
+import functools
+
+from common.utils.err import StreamError
+from common.utils.logger import logger
+
+
+def async_timing(step: str | None = None):
+    """
+    Логирует длительность вызова async-функции (мс) через logger.debug.
+
+    :param step: метка в логе; по умолчанию — имя функции
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            label = step or func.__name__
+            t0 = time.perf_counter()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                logger.info("timing %s: %.2f ms", label, elapsed_ms)
+
+        return wrapper
+
+    return decorator
+
+
+def measure_latency_sync():
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            end_time = time.perf_counter()
+            elapsed_time = (end_time - start_time) * 1000
+            print(f"[LATENCY] {func.__name__}: {elapsed_time:.2f} ms")
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def reconnect_stream(retry=5):
+    base_delay = 1
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(retry):
+                try:
+                    return func(*args, **kwargs)
+                except StreamError as e:
+                    if attempt < retry - 1:
+                        delay = base_delay * (2 ** attempt)
+                        print(f'Повторная попытка через: {delay} секунд')
+                        time.sleep(delay)
+                    else:
+                        raise RuntimeError(f"Функция '{func.__name__}' не удалась после {retry} попыток.") from e
+            return None
+
+        return wrapper
+
+    return decorator
+
+
+def retry_async(retries=3, delay=1):
+    """
+    Декоратор для повторной попытки выполнения функции в случае неудачи.
+    :param retries: количество попыток (по умолчанию 3)
+    :type retries: int
+    :param delay: задержка между попытками в секундах (по умолчанию 1 секунда)
+    :type delay: int
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(1, retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    logger.warning(f"Попытка {attempt} не удалась с ошибкой: {e}")
+                    if attempt < retries:
+                        await asyncio.sleep(delay)
+            raise RuntimeError(f"Функция '{func.__name__}' не удалась после {retries} попыток.")
+
+        return wrapper
+
+    return decorator

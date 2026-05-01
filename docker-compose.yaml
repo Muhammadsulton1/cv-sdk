@@ -1,51 +1,167 @@
-version: '3.7'
-services:
+name: sdk-stack
+
+x-core-dependencies: &core_dependencies
+  redis:
+    condition: service_healthy
   master:
-    image: chrislusf/seaweedfs:3.93
-    command: "master -ip=master -mdir=/data -peers=master:9333 "
+    condition: service_healthy
+  filer:
+    condition: service_healthy
+  volume:
+    condition: service_healthy
+  s3:
+    condition: service_healthy
+  s3-ttl-configure:
+    condition: service_completed_successfully
+
+services:
+  ################################
+  # Необходимые сервисы (Redis + S3)
+  ################################
+
+  redis:
+    image: redis:7-alpine
+    container_name: EnviRedisBroker
+    restart: always
+    #command: [ "redis-server", "/usr/local/etc/redis/redis.conf" ]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 60s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     ports:
-      - "9333:9333"  # Web UI + API
+      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: secret
+    networks:
+      - sdk-net
+    volumes:
+      - ./redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 2024M
+          cpus: "1"
+
+  master:
+    image: chrislusf/seaweedfs:4.06
+    command: "master -ip=master -ip.bind=0.0.0.0 -port=9333 -port.grpc=19333"
+    ports:
+      - "9333:9333"   # Web UI + API
+      - "9321:9321"   # Metrics
       - "19333:19333" # gRPC
     volumes:
-      - master_data:/data
+      - s3_master_data:/data
     networks:
-      - seaweed-net
+      - sdk-net
+    restart: always
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "-O-", "http://localhost:9333/cluster/status" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  volume1:
-    image: chrislusf/seaweedfs:3.93
-    command: "volume -mserver=master:9333 -port=8080 -dir=/data1 -concurrentUploadLimitMB=1000000"
+  volume:
+    image: chrislusf/seaweedfs:4.06
+    command: "volume -mserver=master:9333 -port=8080 -dir=/data1 -ip=volume -ip.bind=0.0.0.0"
     volumes:
-      - ./volume1_data:/data1
+      - ./s3_storage_data:/data1
     depends_on:
-      - master
+      master:
+        condition: service_healthy
     ports:
       - "8080:8080"  # API
-      - "18080:8081" # Web UI
+      - "9322:9322"  # Metrics
+      - "18080:18080"
     networks:
-      - seaweed-net
+      - sdk-net
+    restart: always
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "-O-", "http://localhost:8080/status" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # Filer сервер (HTTP API + S3)
   filer:
-    image: chrislusf/seaweedfs:3.93
-    command: "filer -master=master:9333"
+    image: chrislusf/seaweedfs:4.06
+    command: "filer -master=master:9333 -port=8888 -ip.bind=0.0.0.0 -port.grpc=18888"
     depends_on:
-      - master
+      master:
+        condition: service_healthy
     ports:
-      - "8888:8888"   # Web UI
-      - "8333:8333"   # S3 API
+      - "8888:8888"
+      - "18888:18888"
     networks:
-      - seaweed-net
+      - sdk-net
+    restart: always
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "-O-", "http://localhost:8888/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  s3:
+    image: chrislusf/seaweedfs:4.06
+    entrypoint: [ "/bin/sh", "/setup_s3/s3-entrypoint.sh" ]
+    command:
+      - s3
+      - -filer=filer:8888
+      - -ip.bind=0.0.0.0
+      - -config=/etc/seaweedfs/s3.json
+    env_file:
+      - docker.env
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z localhost 8333" ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    ports:
+      - "8333:8333"
+    volumes:
+      - ./setup_s3/s3-entrypoint.sh:/setup_s3/s3-entrypoint.sh:ro
+    depends_on:
+      filer:
+        condition: service_healthy
+      master:
+        condition: service_healthy
+      volume:
+        condition: service_healthy
+    networks:
+      - sdk-net
+    restart: always
+
+  s3-ttl-configure:
+    image: chrislusf/seaweedfs:4.06
+    volumes:
+      - ./setup_s3/s3-configure.sh:/setup_s3/s3-configure.sh:ro
+    env_file:
+      - docker.env
+    environment:
+      BUCKET_TTLS_JSON: '{"video-frames":"3m","inference":"3m"}'
+    entrypoint: [ "/bin/sh" ]
+    command: [ "/setup_s3/s3-configure.sh" ]
+    depends_on:
+      filer:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - sdk-net
 
   nats:
     image: nats:latest
     ports:
       - "4222:4222"
+      - "8222:8222"
     command: "-js"
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    networks:
+      - sdk-net
 
 #  data_reader:
 #    image: sdk:v1
@@ -85,9 +201,9 @@ services:
 
 
 volumes:
-  master_data:
-  volume1_data:
+  s3_master_data:
+  redis_data:
 
 networks:
-  seaweed-net:
+  sdk-net:
     driver: bridge

@@ -1,0 +1,53 @@
+pipeline:
+  - service_name: VideoReader
+    type: reader
+    description: "Сервис чтения кадров (с первого источника видео-потока)"
+    out_channel: "video-stream"
+    settings:
+      source: C:\\Users\\User\\PycharmProjects\\cv-sdk\\video\\test_maneken.mp4
+      reader_backend: pyav
+      skip_frames: 1
+      target_fps: 0
+      reader_buffer: 100
+      publisher_workers: 2
+      jpeg_encode_threads: 1
+      jpeg_quality: 100
+      queue_policy: block
+      batch_size: 1
+
+  - service_name: VideoReader1
+    type: reader
+    description: "Сервис чтения кадров (с первого источника видео-потока)"
+    out_channel: "video-stream"
+    settings:
+      source: C:\\Users\\User\\PycharmProjects\\cv-sdk\\video\\test_maneken.mp4
+      #source: /video/good.mp4
+      skip_frames: 1
+      target_fps: 10
+      reader_buffer: 100
+      publisher_workers: 8
+      queue_policy: drop_last
+      reader_backend: opencv
+
+  - service_name: Inference
+    type: inference
+    description: "Сервис инференса 1 (детекции/сегментации/классификации итп)"
+    in_channel: "video-stream"
+    out_channel: "inference"
+    settings:
+      batch_size: 1
+      model_path: '/hi/hi'
+      group: "inference_par"
+
+  - service_name: Registrator
+    type: registrator
+    description: "Сервис агрегаций результатов инференса и регистрации событий/нарушений"
+    in_channel: "inference"
+    out_channel: "event"
+    settings:
+
+  - service_name: Sender
+    type: sender
+    description: "Сервис отправки событий ПО REST API/ запись в БД"
+    in_channel: "event"
+    out_channel: "send"
