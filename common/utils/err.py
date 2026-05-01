@@ -33,6 +33,7 @@ class NatsError(Exception):
 class NatsConnectionError(NatsError):
     pass
 
+
 class StreamError(Exception):
     pass
 

@@ -7,8 +7,10 @@ import contextlib
 import cv2
 import numpy as np
 
+from pathlib import Path
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 from common.abstractions.abs_jetstream import AbstractProcessor
 from common.processors.jetstream_processor import StreamPublisher
@@ -22,6 +24,11 @@ class ReaderProcessor(AbstractProcessor):
     _producer → читает кадры → Queue[FrameData]
     _consumer → берёт из очереди → FramePublisher (S3 + JetStream)
     """
+    STREAM_SCHEMES = {"rtsp", "rtsps", "rtmp", "rtmps", "http", "https", "udp", "tcp"}
+    FILE_EXTENSIONS = {
+        ".avi", ".m4v", ".mjpeg", ".mjpg", ".mkv", ".mov",
+        ".mp4", ".mpeg", ".mpg", ".ts", ".webm", ".wmv",
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -30,6 +37,27 @@ class ReaderProcessor(AbstractProcessor):
         settings = self._cfg.get("settings", {})
 
         self.bucket: str = self._cfg.get("out_channel", "conveyor-frames")
+        self.source: str = settings.get("source", "")
+        self.source_type: str = settings.get("source_type", "auto").lower()
+        self.reconnect_streams: bool = self._as_bool(settings.get("reconnect_streams", True))
+        try:
+            self.reconnect_attempts = max(
+                0, int(settings.get("stream_reconnect_attempts", 0))
+            )
+        except (TypeError, ValueError):
+            self.reconnect_attempts = 0
+        try:
+            self.reconnect_delay = max(0.1, float(settings.get("stream_reconnect_delay", 1.0)))
+        except (TypeError, ValueError):
+            self.reconnect_delay = 1.0
+        try:
+            self.reconnect_max_delay = max(self.reconnect_delay,
+                                           float(settings.get("stream_reconnect_max_delay", 30.0)))
+        except (TypeError, ValueError):
+            self.reconnect_max_delay = 30.0
+        self._is_stream_source = self._detect_stream_source(
+            self.source, self.source_type
+        )
         self.buffer_size: int = int(settings.get("reader_buffer", 100))
         self.batch_size: int = int(settings.get("batch_size", 1))
         self.publisher_workers: int = max(1, int(settings.get("publisher_workers", 4)))
@@ -71,6 +99,34 @@ class ReaderProcessor(AbstractProcessor):
         self._stop = asyncio.Event()
 
     @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
+
+    @classmethod
+    def _detect_stream_source(cls, source: str, source_type: str) -> bool:
+        if source_type in {"stream", "rtsp", "camera", "network"}:
+            return True
+        if source_type in {"file", "video"}:
+            return False
+
+        if len(source) >= 3 and source[1:3] in {":\\", ":/"}:
+            return False
+
+        parsed = urlparse(source)
+        if parsed.scheme.lower() in cls.STREAM_SCHEMES:
+            return True
+
+        suffix = Path(source).suffix.lower()
+        if suffix in cls.FILE_EXTENSIONS:
+            return False
+
+        return False
+
+    @staticmethod
     def _jpeg_encode_frame(frame_bgr: np.ndarray, encode_params: tuple[int, Any]) -> tuple[bool, np.ndarray]:
         if encode_params:
             return cv2.imencode(".jpg", frame_bgr, list(encode_params))
@@ -81,30 +137,105 @@ class ReaderProcessor(AbstractProcessor):
         from common.processors.reader_processor import FrameReaderFabric
         return FrameReaderFabric().get_reader()
 
+    async def _open_reader(self):
+        failed_attempts = 0
+        while not self._stop.is_set():
+            try:
+                return self._build_reader()
+            except Exception as exc:
+                if not self.reconnect_streams or not self._is_stream_source:
+                    raise
+
+                if 0 < self.reconnect_attempts <= failed_attempts:
+                    raise
+
+                failed_attempts += 1
+                delay = min(self.reconnect_delay * (2 ** (failed_attempts - 1)), self.reconnect_max_delay)
+                logger.error("Stream open failed, retrying in %.1f sec: source=%s attempt=%d error=%s",
+                             delay, self.source, failed_attempts, exc, exc_info=True)
+                await asyncio.sleep(delay)
+
+        return None
+
+    async def _reconnect_reader(self, failed_attempts: int) -> tuple[bool, int]:
+        if not self.reconnect_streams or not self._is_stream_source:
+            return False, failed_attempts
+
+        if 0 < self.reconnect_attempts <= failed_attempts:
+            logger.error("Stream reconnect attempts exhausted: source=%s attempts=%d", self.source, failed_attempts)
+            return False, failed_attempts
+
+        failed_attempts += 1
+        delay = min(self.reconnect_delay * (2 ** (failed_attempts - 1)), self.reconnect_max_delay)
+        logger.warning("Stream interrupted, reconnecting in %.1f sec: source=%s attempt=%d",
+                       delay, self.source, failed_attempts)
+        await asyncio.sleep(delay)
+
+        if self.reader:
+            with contextlib.suppress(Exception):
+                self.reader.release()
+
+        try:
+            self.reader = self._build_reader()
+        except Exception as exc:
+            logger.error(
+                "Stream reconnect failed: source=%s attempt=%d error=%s",
+                self.source, failed_attempts, exc, exc_info=True,
+            )
+            return True, failed_attempts
+
+        logger.info("Stream reconnected: source=%s cam_id=%s", self.source, self.reader.source_id)
+        return True, 0
+
     async def _producer(self) -> None:
         """Читает кадры из cv-ридера, кодирует в JPEG, кладёт в очередь."""
-        self.reader = self._build_reader()
+        self.reader = await self._open_reader()
+        if self.reader is None:
+            return
+
         frame_interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
         next_frame_at = time.monotonic()
+        reconnect_failures = 0
 
         logger.info("Reader started: cam_id=%s buffer=%d workers=%d queue_policy=%s "
-                    "target_fps=%s jpeg_threads=%s jpeg_quality=%s",
+                    "target_fps=%s jpeg_threads=%s jpeg_quality=%s source_type=%s",
                     self.reader.source_id,
                     self.buffer_size,
                     self.publisher_workers,
                     self.queue_policy,
                     self.target_fps or "unlimited",
                     self._jpeg_encode_worker_count,
-                    self._jpeg_quality_log)
+                    self._jpeg_quality_log,
+                    "stream" if self._is_stream_source else "file")
 
         while not self._stop.is_set():
-            frame_ndarray = self.reader.get_frame()
+            try:
+                frame_ndarray = self.reader.get_frame()
+            except Exception as exc:
+                if not self._is_stream_source:
+                    logger.error(
+                        "Ошибка чтения файла source=%s: %s",
+                        self.source, exc, exc_info=True,
+                    )
+                    raise
+
+                logger.warning(
+                    "Ошибка чтения stream source=%s: %s",
+                    self.source, exc, exc_info=True,
+                )
+                frame_ndarray = None
 
             if frame_ndarray is None:
-                logger.info("Поток завершился, останавливаем producer")
+                reconnected, reconnect_failures = await self._reconnect_reader(reconnect_failures)
+                if reconnected:
+                    next_frame_at = time.monotonic()
+                    continue
+
+                logger.info("Источник завершился, останавливаем producer")
                 self._stop.set()
                 break
 
+            reconnect_failures = 0
             raw = self.reader.to_raw_frame(frame_ndarray)
 
             encode_params = self._jpeg_encode_params

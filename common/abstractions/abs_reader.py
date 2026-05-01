@@ -100,8 +100,6 @@ class AbstractFrameReader(ABC):
             source_fps=fps,
         )
 
-    # ── Abstract ──────────────────────────────────────────────────────────────
-
     @abstractmethod
     def get_fps(self) -> float:
         pass

@@ -1,12 +1,11 @@
 import os
-
 import cv2
-from common.abstractions.abs_reader import AbstractFrameReader, AbstractFrameReaderFabric
 import time
 import av
 import numpy as np
 
 from av.error import FFmpegError
+from common.abstractions.abs_reader import AbstractFrameReader, AbstractFrameReaderFabric
 from common.utils.err import StreamError
 from common.singeleton.config_manager import ConfigManager
 

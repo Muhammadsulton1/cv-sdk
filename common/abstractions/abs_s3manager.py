@@ -1,17 +1,5 @@
-import uuid
 from abc import ABC, abstractmethod
-
-from botocore.exceptions import ClientError
-
 from common.utils.data_types import FrameData, S3DownloadData, S3UploadData
-from common.utils.err import S3DownloadError, S3UploadError
-from common.utils.logger import logger
-from abc import ABC, abstractmethod
-
-from botocore.exceptions import ClientError
-
-from common.utils.err import S3CreateBucketError
-from common.utils.logger import logger
 
 
 class AbsS3FrameStorage(ABC):

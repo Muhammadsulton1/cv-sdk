@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 
 from botocore.exceptions import ClientError
 
@@ -91,45 +90,3 @@ class S3BucketManager(AbsS3BucketManager):
                     await self.create_bucket(name)
                 else:
                     raise
-
-
-class S3Pipeline:
-    """
-    Оркестратор: собирает FrameData из сырых данных ридера
-    и делегирует I/O в storage.
-    """
-    def __init__(self, storage: AbsS3FrameStorage, bucket_manager: AbsS3BucketManager,
-                 bucket: str = "reader-frames") -> None:
-
-        self._storage = storage
-        self._bucket_manager = bucket_manager
-        self._bucket = bucket
-
-    async def initialize(self) -> None:
-        """Один раз при старте — гарантирует наличие бакета."""
-        await self._bucket_manager.ensure_bucket(self._bucket)
-
-    async def save_frame(self, cam_id: str, frame_bytes: bytes) -> S3UploadData:
-        """
-        Принимает сырые данные от ридера,
-        собирает FrameData и передаёт в storage.
-        """
-        data = FrameData(
-            bucket=self._bucket,
-            cam_id=cam_id,
-            key=f"{uuid.uuid4().hex}.jpg",
-            frame=frame_bytes,
-        )
-        return await self._storage.upload_frame(data)
-
-    async def load_frame(self, cam_id: str, key: str) -> S3DownloadData:
-        """
-        Принимает cam_id + ключ (из S3UploadData.key),
-        возвращает S3DownloadData с байтами кадра.
-        """
-        data = S3UploadData(
-            bucket=self._bucket,
-            cam_id=cam_id,
-            key=key,
-        )
-        return await self._storage.download_frame(data)

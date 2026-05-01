@@ -1,4 +1,3 @@
-# common/utils/data_types.py
 from dataclasses import dataclass
 from typing import Optional
 
